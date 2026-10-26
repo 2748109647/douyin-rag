@@ -1,5 +1,6 @@
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
@@ -55,3 +56,36 @@ class ApiTest(TestCase):
         base = {"plan_id": plan["id"], "revision": plan["revision"]}
         self.assertEqual(self.client.post("/api/execute", headers=self.headers, json=base).json()["code"], "confirmation_required")
         self.assertEqual(self.client.post("/api/execute", headers=self.headers, json={**base, "confirmed": True, "revision": 0}).status_code, 409)
+
+    def test_knowledge_chat_history_and_local_request_boundaries(self):
+        state = self.client.get("/api/knowledge").json()
+        self.assertEqual(state["total"], 0)
+        self.assertEqual(self.client.post("/api/chat", json={"question": "合成问题"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/knowledge/index").status_code, 403)
+        self.assertEqual(self.client.post("/api/chat", headers=self.headers, json={"question": "合成问题"}).json()["code"], "snapshot_required")
+        self.client.post("/api/demo", headers=self.headers)
+        response = self.client.post("/api/chat", headers=self.headers, json={"question": "番茄牛腩怎么做？"})
+        self.assertEqual(response.status_code, 200)
+        conversation = response.json()
+        self.assertIn("合成示例", conversation["messages"][-1]["content"])
+        self.assertEqual(self.client.get("/api/chat/" + conversation["id"]).json(), conversation)
+        self.assertEqual(self.client.post("/api/knowledge/index", headers=self.headers).json()["code"], "demo_mode")
+        self.owner.data["snapshot"].update(demo=False, account_marker="other-account")
+        self.assertEqual(self.client.get("/api/chat/" + conversation["id"]).json()["code"], "session_not_found")
+
+    def test_chat_validation_and_snapshot_change_do_not_persist_partial_messages(self):
+        self.client.post("/api/demo", headers=self.headers)
+        for question in (" ", "x" * 2001):
+            result = self.client.post("/api/chat", headers=self.headers, json={"question": question})
+            self.assertIn(result.status_code, (400, 422))
+        self.assertEqual(self.client.get("/api/knowledge").json()["sessions"], [])
+        from douyin_rag.collections import CollectionError
+        self.owner.knowledge.ask = AsyncMock(side_effect=CollectionError("正在回答", "busy"))
+        self.assertEqual(self.client.post("/api/chat", headers=self.headers, json={"question": "合成问题"}).status_code, 409)
+
+    def test_older_settings_clients_preserve_selected_transcription_model(self):
+        self.client.put("/api/settings", headers=self.headers, json={"asr_model": "base"})
+        result = self.client.put("/api/settings", headers=self.headers, json={"model": "mock-model"})
+        self.assertEqual(result.json()["asr_model"], "base")
+        result = self.client.put("/api/settings", headers=self.headers, json={"asr_model": "unsupported"})
+        self.assertEqual(result.status_code, 422)

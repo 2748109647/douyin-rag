@@ -44,6 +44,8 @@ class Organizer:
             self.job.update(status="interrupted", message="上次任务中断，可继续已保存的分类或整理计划。")
         self.task = None
         self.stop = asyncio.Event()
+        from .rag import KnowledgeBase
+        self.knowledge = KnowledgeBase(self)
 
     def read(self, name, default):
         try:
@@ -81,7 +83,7 @@ class Organizer:
         settings["api_key"] = os.getenv("DOUYIN_RAG_API_KEY") or settings.get("api_key", "")
         settings["base_url"] = os.getenv("DOUYIN_RAG_API_BASE") or settings.get("base_url", "")
         settings["model"] = os.getenv("DOUYIN_RAG_MODEL") or settings.get("model", "")
-        return {"max_folders": 8, "batch_size": 20, "interval": 2.0, "cookie_path": "", **settings}
+        return {"max_folders": 8, "batch_size": 20, "interval": 2.0, "cookie_path": "", "asr_model": "small", **settings}
 
     def public_settings(self):
         config = self.config()
@@ -105,7 +107,7 @@ class Organizer:
     def save_settings(self, values):
         self.require_idle()
         settings = dict(self.settings)
-        for key in ("base_url", "model", "cookie_path", "max_folders", "batch_size", "interval"):
+        for key in ("base_url", "model", "cookie_path", "max_folders", "batch_size", "interval", "asr_model"):
             if key in values:
                 settings[key] = values[key]
         endpoint = settings.get("base_url", "").strip().rstrip("/")
@@ -124,6 +126,8 @@ class Organizer:
             raise CollectionError("分类批次大小须为 1～50。", "invalid_settings")
         if not 1 <= float(settings.get("interval", 2)) <= 30:
             raise CollectionError("操作间隔须为 1～30 秒。", "invalid_settings")
+        if settings.get("asr_model", "small") not in {"base", "small"}:
+            raise CollectionError("转写模型只支持 base 或 small。", "invalid_settings")
         self.write("settings", settings)
         self.settings = settings
         return self.public_settings()
@@ -249,7 +253,7 @@ class Organizer:
         async with httpx.AsyncClient(timeout=120, transport=transport, follow_redirects=False) as client:
             response = await client.post(url, headers=headers, json={"model": config["model"], "messages": messages, "temperature": 0.2})
         if response.status_code >= 400:
-            raise CollectionError(f"分类模型请求失败（HTTP {response.status_code}），请检查服务地址、模型及密钥。", "model_error")
+            raise CollectionError(f"模型请求失败（HTTP {response.status_code}），请检查服务地址、模型及密钥。", "model_error")
         try:
             content = response.json()["choices"][0]["message"]["content"]
             if isinstance(content, str) and content.strip().startswith("```"):
@@ -368,6 +372,7 @@ class Organizer:
         self.archive_current()
         snapshot, plan = demo_data()
         self.data.update(snapshot=snapshot, plan=plan)
+        self.knowledge.use_demo()
         self.job = None
         self.write("job", None)
         self.persist()

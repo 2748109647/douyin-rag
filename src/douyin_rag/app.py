@@ -5,7 +5,9 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -27,6 +29,7 @@ class SettingsInput(BaseModel):
     max_folders: int = Field(default=8, ge=2, le=20)
     batch_size: int = Field(default=20, ge=1, le=50)
     interval: float = Field(default=2, ge=1, le=30)
+    asr_model: Literal["base", "small"] = "small"
 
 
 class ClassifyInput(BaseModel):
@@ -37,6 +40,11 @@ class ExecuteInput(BaseModel):
     plan_id: str
     revision: int
     confirmed: bool = False
+
+
+class ChatInput(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    session_id: str = Field(default="", max_length=64)
 
 
 def create_app(organizer=None):
@@ -99,6 +107,30 @@ def create_app(organizer=None):
     async def state():
         return owner.status()
 
+    @app.get("/api/knowledge")
+    async def knowledge():
+        return owner.knowledge.status()
+
+    @app.post("/api/knowledge/index")
+    async def index_content():
+        if login_browser:
+            raise CollectionError("请先完成登录，再处理视频内容。", "busy")
+        snapshot = owner.knowledge.snapshot()
+        if snapshot.get("demo"):
+            raise CollectionError("示例模式已提供合成转写，请切换真实收藏后处理。", "demo_mode")
+        return owner.start("index", owner.knowledge.index)
+
+    @app.get("/api/chat/{session_id}")
+    async def conversation(session_id: str):
+        return owner.knowledge.session(session_id)
+
+    @app.post("/api/chat")
+    async def chat(values: ChatInput):
+        try:
+            return await owner.knowledge.ask(values.question, values.session_id)
+        except httpx.HTTPError:
+            raise CollectionError("问答模型请求失败，请检查网络或服务配置后重试。", "model_error") from None
+
     @app.get("/api/connection")
     async def connection():
         try:
@@ -109,7 +141,10 @@ def create_app(organizer=None):
 
     @app.put("/api/settings")
     async def settings(values: SettingsInput):
-        return owner.save_settings(values.model_dump())
+        payload = values.model_dump()
+        if "asr_model" not in values.model_fields_set:
+            payload.pop("asr_model")
+        return owner.save_settings(payload)
 
     @app.post("/api/scan")
     async def scan():

@@ -11,6 +11,9 @@ dependencies = [
     "httpx==0.28.1",
     "mini-racer==0.14.1",
     "playwright==1.58.0",
+    "faster-whisper==1.2.1",
+    "av==16.1.0",
+    "fastembed>=0.7,<1",
 ]
 
 [build-system]

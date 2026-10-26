@@ -355,6 +355,16 @@ class CollectionClient:
             "/aweme/v1/web/aweme/listcollection/", cursor, count, method="POST",
         )
 
+    async def get_video_detail(self, aweme_id: str) -> dict:
+        """即时读取作品详情，避免把会过期的媒体地址写进收藏快照。"""
+        if not isinstance(aweme_id, str) or not aweme_id.isdigit():
+            raise ValueError("作品 ID 必须为数字字符串")
+        result = await self._request("GET", "/aweme/v1/web/aweme/detail/", {"aweme_id": aweme_id})
+        detail = result.get("aweme_detail")
+        if result.get("status_code") != 0 or not isinstance(detail, dict) or str(detail.get("aweme_id")) != aweme_id:
+            raise CollectionError("无法读取该视频内容，可能已删除、不可访问或需要重新登录。", "content_unavailable")
+        return detail
+
 def _pick_first_url(image_data: dict) -> str:
     """从抖音图片对象中提取最合适的 URL。"""
     candidate_paths = [
