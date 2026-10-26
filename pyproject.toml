@@ -1,0 +1,28 @@
+[project]
+name = "douyin-rag"
+version = "0.1.0"
+description = "在本机网页中分类、预览和整理抖音收藏的视频与图文"
+requires-python = ">=3.12"
+readme = "README.md"
+license = {file = "LICENSE"}
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+    "httpx==0.28.1",
+    "mini-racer==0.14.1",
+    "playwright==1.58.0",
+]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+douyin-rag = "douyin_rag.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/douyin_rag"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"web" = "douyin_rag/web"
+"THIRD_PARTY_NOTICES.md" = "douyin_rag/THIRD_PARTY_NOTICES.md"
