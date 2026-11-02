@@ -1,12 +1,36 @@
 from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from douyin_rag.collections import CollectionError
 from douyin_rag.writer import BrowserWriter
 
 
 class WriterTest(IsolatedAsyncioTestCase):
+    async def test_headless_scan_reuses_session_and_visible_verification_reopens_profile(self):
+        with TemporaryDirectory() as directory:
+            writer = BrowserWriter(directory)
+            page = Mock()
+            page.is_closed.return_value = False
+            page.goto = AsyncMock()
+            context = AsyncMock()
+            context.pages = [page]
+            playwright = Mock()
+            playwright.stop = AsyncMock()
+            playwright.chromium.launch_persistent_context = AsyncMock(return_value=context)
+            starter = Mock()
+            starter.start = AsyncMock(return_value=playwright)
+            with patch("douyin_rag.writer.async_playwright", return_value=starter):
+                await writer.open(headless=True)
+                self.assertTrue(playwright.chromium.launch_persistent_context.call_args.kwargs["headless"])
+                await writer.open(headless=True)
+                self.assertEqual(playwright.chromium.launch_persistent_context.await_count, 1)
+                await writer.open(headless=False)
+                self.assertFalse(playwright.chromium.launch_persistent_context.call_args.kwargs["headless"])
+                self.assertEqual(playwright.chromium.launch_persistent_context.await_count, 2)
+                context.close.assert_awaited_once()
+                await writer.close()
+
     async def test_existing_folder_is_reused_and_duplicates_rejected(self):
         with TemporaryDirectory() as directory:
             writer = BrowserWriter(directory)

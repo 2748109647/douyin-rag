@@ -1,6 +1,6 @@
 import json
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs
 
 import httpx
@@ -45,6 +45,36 @@ class CollectionsTest(IsolatedAsyncioTestCase):
                 await self.client.get_collection_folders(**kwargs)
         with self.assertRaises(ValueError):
             await self.client.get_collection_videos(" ")
+
+    async def test_browser_reads_reuse_page_and_validate_response_without_http_signer(self):
+        page = AsyncMock()
+        self.client.browser_page = page
+        self.client._init_verify_params = AsyncMock(side_effect=AssertionError("Must use browser session"))
+        for call, uri, method in (
+            (lambda: self.client.get_collected_videos(cursor=3, count=2), "/aweme/v1/web/aweme/listcollection/", "POST"),
+            (lambda: self.client.get_collection_folders(), "/aweme/v1/web/collects/list/", "GET"),
+            (lambda: self.client.get_collection_videos("9000000000000000001"), "/aweme/v1/web/collects/video/list/", "GET"),
+        ):
+            key = "collects_list" if uri.endswith("collects/list/") else "aweme_list"
+            page.evaluate.return_value = {"ok": True, "data": {"status_code": 0, key: [], "cursor": 4, "has_more": 0}}
+            result = await call()
+            self.assertEqual(result["cursor"], 4)
+            payload = page.evaluate.call_args.args[1]
+            self.assertEqual((payload["uri"], payload["method"]), (uri, method))
+            self.assertNotIn("synthetic", str(payload))
+            if "video/list" in uri:
+                self.assertEqual(payload["params"]["collects_id"], "9000000000000000001")
+        self.client._get_sign.assert_not_called()
+
+    async def test_browser_rejections_and_missing_list_never_become_empty_success(self):
+        self.client.browser_page = AsyncMock()
+        for response in ({"ok": False, "http": 403},
+                         {"ok": True, "data": {"status_code": 5}},
+                         {"ok": True, "data": {"status_code": 0}},
+                         {"ok": True, "data": []}):
+            self.client.browser_page.evaluate.return_value = response
+            with self.assertRaises(CollectionError):
+                await self.client.get_collected_videos()
 
     async def test_upstream_rejection_is_not_empty_success_or_raw_body(self):
         for status, payload in ((200, {"status_code": 1}), (200, {"status_code": 0}), (403, "ArgusSecurityPlugin Signature Not Found private-payload")):

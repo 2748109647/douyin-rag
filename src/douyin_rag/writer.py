@@ -20,13 +20,20 @@ class BrowserWriter:
         self.interval = interval
         self.client_factory = client_factory
         self.playwright = self.context = self.page = None
+        self.headless = False
 
-    async def open(self, cookies=""):
+    async def open(self, cookies="", *, headless=False):
         if self.page and not self.page.is_closed():
-            return
+            if self.headless and not headless:
+                await self.close()
+            else:
+                return
+        if self.context:
+            await self.close()
         self.root.mkdir(parents=True, exist_ok=True)
         self.playwright = await async_playwright().start()
-        options = {"headless": False, "viewport": {"width": 1440, "height": 1000}, "locale": "zh-CN"}
+        self.headless = headless
+        options = {"headless": headless, "viewport": {"width": 1440, "height": 1000}, "locale": "zh-CN"}
         # 优先使用本机 Edge，不下载或改动已安装浏览器。
         executable = os.getenv("DOUYIN_RAG_BROWSER")
         if executable:

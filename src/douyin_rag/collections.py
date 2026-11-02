@@ -93,12 +93,13 @@ def load_cookies(configured=''):
     return result.value
 
 class CollectionClient:
-    def __init__(self, cookies: str, proxy: Optional[str] = None):
+    def __init__(self, cookies: str, proxy: Optional[str] = None, browser_page=None):
         normalized = normalize_cookie_string(cookies)
         if not normalized.has_session:
             raise CollectionError('登录状态缺少有效会话', 'login_required')
         self.cookies = normalized.value
         self.proxy = proxy
+        self.browser_page = browser_page
         self.user_agent = DOUYIN_FIXED_USER_AGENT
         self.verify_params = None
         self._cookie_ms_token = self._extract_ms_token_from_cookie(self.cookies)
@@ -305,6 +306,12 @@ class CollectionClient:
             raise ValueError("cursor 必须 >= 0，count 必须在 1 到 50 之间")
         if collects_id is not None and not collects_id.strip():
             raise ValueError("collects_id 不能为空，请先获取收藏夹列表")
+        if self.browser_page is not None:
+            params = {"cursor": cursor, "count": count}
+            if collects_id is not None:
+                params["collects_id"] = collects_id.strip()
+            result = await self._browser_collection_request(uri, method, params)
+            return self._validate_collection_response(result, uri)
         await self._init_verify_params()
         params = {
             "cursor": cursor, "count": count,
@@ -327,6 +334,51 @@ class CollectionClient:
         result = await self._request(
             method, uri, params, headers=headers, json_data=json_data, web_uifid=uifid or "",
         )
+        return self._validate_collection_response(result, uri)
+
+    async def _browser_collection_request(self, uri, method, params):
+        # 留在扫码使用的页面中，由抖音安全 SDK 处理签名与会话相关请求头。
+        result = await self.browser_page.evaluate(r"""async ({uri, method, params, common}) => {
+            if (location.origin !== 'https://www.douyin.com') return {ok:false};
+            const cookie = Object.fromEntries(document.cookie.split(';').map(v => v.trim().split(/=(.*)/s).slice(0,2)));
+            const chrome = navigator.userAgent.match(/Chrome\/([\d.]+)/)?.[1] || '';
+            const windows = navigator.platform.startsWith('Win');
+            Object.assign(common, {browser_language:navigator.language, browser_platform:navigator.platform,
+                browser_version:chrome, engine_version:chrome, screen_width:String(screen.width),
+                screen_height:String(screen.height), cpu_core_num:String(navigator.hardwareConcurrency || 8),
+                device_memory:String(navigator.deviceMemory || 8), os_name:windows?'Windows':'Mac OS',
+                os_version:windows?'10':'10.15.7', pc_libra_divert:windows?'Windows':'Mac',
+                support_h265:'1', support_dash:'1'});
+            Object.assign(common, params);
+            if (cookie.msToken) common.msToken = cookie.msToken;
+            if (cookie.s_v_web_id) common.verifyFp = common.fp = cookie.s_v_web_id;
+            const headers = {'accept':'application/json'};
+            if (cookie.UIFID || cookie.UIFID_TEMP) headers.uifid = cookie.UIFID || cookie.UIFID_TEMP;
+            if (cookie.passport_csrf_token) headers['x-secsdk-csrf-token'] = cookie.passport_csrf_token;
+            const options = {method, credentials:'include', headers, signal:AbortSignal.timeout(30000)};
+            if (method === 'POST') {
+                headers['content-type'] = 'application/json; charset=UTF-8';
+                options.body = JSON.stringify(common);
+            }
+            try {
+                const response = await fetch(uri+'?'+new URLSearchParams(common), options);
+                if (!response.ok) return {ok:false, http:response.status};
+                const data = await response.json();
+                if (!data || typeof data !== 'object' || Array.isArray(data)) return {ok:false};
+                // 不把原始响应中的会话字段带回应用或写入日志。
+                const keys = ['status_code','aweme_list','collects_list','cursor','has_more',
+                    'invalid_item_count','invalid_item_text','is_clear_invalid_item'];
+                return {ok:true, data:Object.fromEntries(keys.filter(k => k in data).map(k => [k,data[k]]))};
+            } catch { return {ok:false}; }
+        }""", {"uri": uri, "method": method, "params": params, "common": dict(self.COMMON_PARAMS)})
+        if not result.get("ok"):
+            raise CollectionError("浏览器未能读取收藏，请在连接设置中打开验证窗口，完成验证后重试。", "browser_attention")
+        return result["data"]
+
+    @staticmethod
+    def _validate_collection_response(result, uri):
+        if not isinstance(result, dict):
+            raise DataFetchError("收藏接口响应格式不正确，未确认扫描结果")
         if result.get("status_code") != 0:
             raise DataFetchError(
                 f"收藏接口未成功（status_code={result.get('status_code')}），"

@@ -62,6 +62,29 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             await self.owner.scan()
         self.assertEqual(self.owner.data["snapshot"], previous)
 
+    async def test_local_login_scan_reuses_browser_and_preserves_explicit_cookie_mode(self):
+        browser = AsyncMock()
+        browser.page = object()
+        browser.cookies.return_value = "sessionid=synthetic-browser"
+        self.owner.writer_factory = lambda: browser
+        (self.owner.root / "login.cookies").write_text("sessionid=synthetic", encoding="utf-8")
+        clients = []
+        def factory(cookies):
+            client = FakeClient(cookies)
+            clients.append((cookies, client))
+            return client
+        self.owner.client_factory = factory
+        with patch.dict("os.environ", {"DOUYIN_COOKIE": "", "DOUYIN_COOKIE_PATH": ""}), patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+            await self.owner.scan()
+            self.assertIs(clients[-1][1].browser_page, browser.page)
+            self.assertEqual(clients[-1][0], "sessionid=synthetic-browser")
+            browser.open.assert_awaited_once_with(headless=True)
+            browser.close.assert_not_awaited()
+            self.owner.settings["cookie_path"] = "external.cookies"
+            await self.owner.scan()
+            self.assertFalse(hasattr(clients[-1][1], "browser_page"))
+            self.assertEqual(browser.open.await_count, 1)
+
     async def test_model_protocol_fences_and_error_redaction(self):
         def reply(request):
             self.assertEqual(str(request.url), "http://model.test/v1/chat/completions")
