@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from douyin_rag.collections import CollectionError
 from douyin_rag.writer import BrowserWriter
+from douyin_rag.verification import DOUYIN_FIXED_USER_AGENT
 
 
 class WriterTest(IsolatedAsyncioTestCase):
@@ -23,6 +24,7 @@ class WriterTest(IsolatedAsyncioTestCase):
             with patch("douyin_rag.writer.async_playwright", return_value=starter):
                 await writer.open(headless=True)
                 self.assertTrue(playwright.chromium.launch_persistent_context.call_args.kwargs["headless"])
+                self.assertEqual(playwright.chromium.launch_persistent_context.call_args.kwargs["user_agent"], DOUYIN_FIXED_USER_AGENT)
                 await writer.open(headless=True)
                 self.assertEqual(playwright.chromium.launch_persistent_context.await_count, 1)
                 await writer.open(headless=False)
@@ -31,7 +33,7 @@ class WriterTest(IsolatedAsyncioTestCase):
                 context.close.assert_awaited_once()
                 await writer.close()
 
-    async def test_qr_states_and_login_probe_do_not_accept_cookie_alone(self):
+    async def test_qr_login_finishes_on_session_without_probing_collections(self):
         with TemporaryDirectory() as directory:
             writer = BrowserWriter(directory)
             writer.page = Mock()
@@ -50,15 +52,30 @@ class WriterTest(IsolatedAsyncioTestCase):
             self.assertEqual((await writer.login_state())["status"], "expired")
             writer.qr_element.return_value = None
             writer.cookies = AsyncMock(return_value="sessionid=synthetic")
-            client = AsyncMock()
-            client.__aenter__.return_value = client
-            client.get_collected_videos.side_effect = CollectionError("rejected")
-            with patch("douyin_rag.writer.CollectionClient", return_value=client):
-                self.assertEqual((await writer.login_state())["status"], "attention")
-                client.get_collected_videos.side_effect = None
+            with patch("douyin_rag.writer.CollectionClient", side_effect=AssertionError("Login must not read collections")) as factory:
                 self.assertEqual((await writer.login_state())["status"], "authenticated")
+                # 手机确认后，即使页面二维码尚未消失，也不阻塞登录完成。
+                writer.qr_element.return_value = qr
+                self.assertEqual((await writer.login_state())["status"], "authenticated")
+                factory.assert_not_called()
             writer.page.is_closed.return_value = True
-            self.assertEqual((await writer.login_state())["status"], "attention")
+            self.assertEqual((await writer.login_state())["status"], "error")
+
+    async def test_login_cookies_include_douyin_subdomains_and_exclude_other_sites(self):
+        with TemporaryDirectory() as directory:
+            writer = BrowserWriter(directory)
+            writer.context = AsyncMock()
+            writer.context.cookies.return_value = [
+                {"name": "sessionid", "value": "synthetic", "domain": ".douyin.com"},
+                {"name": "passport_csrf_token", "value": "synthetic-csrf", "domain": "passport.douyin.com"},
+                {"name": "sessionid", "value": "unrelated", "domain": "notdouyin.com"},
+                {"name": "other", "value": "private", "domain": "example.test"},
+            ]
+            self.assertEqual(await writer.cookies(), "sessionid=synthetic; passport_csrf_token=synthetic-csrf")
+            writer.context.cookies.assert_awaited_once_with()
+            await writer.save_login()
+            self.assertEqual((writer.root / "login.cookies").read_text(encoding="utf-8"),
+                             "sessionid=synthetic; passport_csrf_token=synthetic-csrf")
 
     async def test_qr_capture_requires_unique_visible_element_with_reasonable_size(self):
         with TemporaryDirectory() as directory:

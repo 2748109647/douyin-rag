@@ -10,6 +10,7 @@ from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as BrowserTimeout, Error as BrowserError
 
 from .collections import CollectionClient, CollectionError, normalize_cookie_string
+from .verification import DOUYIN_FIXED_USER_AGENT
 
 
 class BrowserWriter:
@@ -35,7 +36,8 @@ class BrowserWriter:
         self.root.mkdir(parents=True, exist_ok=True)
         self.playwright = await async_playwright().start()
         self.headless = headless
-        options = {"headless": headless, "viewport": {"width": 1440, "height": 1000}, "locale": "zh-CN"}
+        options = {"headless": headless, "viewport": {"width": 1440, "height": 1000}, "locale": "zh-CN",
+                   "user_agent": DOUYIN_FIXED_USER_AGENT}
         # 优先使用本机 Edge，不下载或改动已安装浏览器。
         executable = os.getenv("DOUYIN_RAG_BROWSER")
         if executable:
@@ -83,16 +85,21 @@ class BrowserWriter:
             await (await self.unique_visible(trigger, "登录入口")).click()
             await self.page.locator(self.QR).first.wait_for(state="visible", timeout=15000)
         except (BrowserTimeout, CollectionError):
-            # 风控、入口变更等情况由页面提供显式验证入口。
+            # 入口变化或页面未就绪时，由当前页面提供重新获取二维码的入口。
             return
 
     async def login_state(self):
         if not self.page or self.page.is_closed():
-            return {"status": "attention", "message": "登录页面已关闭，请重新获取二维码。"}
+            return {"status": "error", "message": "登录页面已关闭，请重新获取二维码。"}
         try:
-            challenge = self.page.locator('iframe[src*="captcha"], #captcha_container, [id*="verify-bar"]')
-            if any([await element.is_visible() for element in await challenge.all()]):
-                return {"status": "attention", "message": "抖音需要额外验证，请打开验证窗口完成操作。"}
+            # 与 douyin-mcp 的扫码流程一致：会话 Cookie 到达即完成登录。
+            # 收藏读取属于扫描，不作为扫码成功的前置条件。
+            try:
+                await self.cookies()
+            except CollectionError:
+                pass
+            else:
+                return {"status": "authenticated", "message": "登录成功，可以使用收藏了。"}
             qr = await self.qr_element()
             if qr:
                 expired = self.page.get_by_text(re.compile(r"二维码.*(失效|过期)|点击刷新|刷新二维码"))
@@ -101,24 +108,19 @@ class BrowserWriter:
                 image = await qr.screenshot(type="png", timeout=5000)
                 return {"status": "waiting", "message": "使用抖音 App 扫码，并在手机上确认登录。",
                         "qr_image": "data:image/png;base64," + base64.b64encode(image).decode("ascii")}
-            try:
-                cookies = await self.cookies()
-            except CollectionError:
-                return {"status": "attention", "message": "暂未获取到二维码，请重试或打开验证窗口。"}
-            # Cookie 存在不等于会话可用；读接口成功后才报告登录成功。
-            async with CollectionClient(cookies, browser_page=self.page) as client:
-                await client.get_collected_videos(count=1)
-            return {"status": "authenticated", "message": "登录成功，可以扫描收藏了。"}
-        except (CollectionError, BrowserError):
-            return {"status": "attention", "message": "登录或收藏访问尚未验证成功，请打开验证窗口处理后重试。"}
+            return {"status": "waiting", "message": "正在等待登录页面和二维码加载。"}
+        except BrowserError:
+            return {"status": "error", "message": "暂未获取到二维码，请重新获取。"}
 
     async def cookies(self):
         if not self.context:
             raise CollectionError("抖音登录窗口尚未打开。", "login_required")
-        values = await self.context.cookies("https://www.douyin.com")
-        cookie = "; ".join(f"{item['name']}={item['value']}" for item in values)
+        values = await self.context.cookies()
+        cookie = "; ".join(f"{item['name']}={item['value']}" for item in values
+                           if item["domain"].lstrip(".").lower() == "douyin.com"
+                           or item["domain"].lower().endswith(".douyin.com"))
         if not normalize_cookie_string(cookie).has_session:
-            raise CollectionError("请在打开的抖音窗口完成登录或验证，然后点击‘完成登录’。", "login_required")
+            raise CollectionError("请使用抖音 App 扫码，并在手机上确认登录。", "login_required")
         return cookie
 
     async def save_login(self):

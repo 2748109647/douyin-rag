@@ -214,7 +214,7 @@ def create_app(organizer=None):
         login_result = await login_browser.login_state()
         if login_result["status"] == "authenticated":
             await login_browser.save_login()
-            # 保留扫码时的页面、存储和安全 SDK，后续扫描复用同一会话。
+            await login_browser.close()
             login_browser = None
         return login_result
 
@@ -233,17 +233,6 @@ def create_app(organizer=None):
             await login_browser.page.reload(wait_until="domcontentloaded", timeout=45000)
             await login_browser.prepare_login()
             return await complete_login()
-
-    @app.post("/api/browser/visible")
-    async def visible_login():
-        nonlocal login_browser, login_result
-        async with login_lock:
-            owner.require_idle()
-            login_browser = login_browser or owner.writer_factory()
-            await login_browser.open(headless=False)
-            await login_browser.prepare_login()
-            login_result = {"status": "verifying", "message": "请在验证窗口完成操作；本页会自动检测结果。"}
-            return login_result
 
     @app.post("/api/browser/cancel")
     async def cancel_login():

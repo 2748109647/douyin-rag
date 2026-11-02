@@ -211,18 +211,7 @@ class Organizer:
     async def scan(self):
         cookies = self.cookies()
         invalid_pages, folders, works = [], {}, {}
-        browser_page = None
-        # 显式外部 Cookie 继续走原读取方式；本应用扫码会话保留浏览器环境。
-        if (self.writer_factory and (self.root / "login.cookies").is_file()
-                and not self.config()["cookie_path"]
-                and not os.getenv("DOUYIN_COOKIE") and not os.getenv("DOUYIN_COOKIE_PATH")):
-            browser = self.writer_factory()
-            await browser.open(headless=True)
-            cookies = await browser.cookies()
-            browser_page = browser.page
         async with self.client_factory(cookies) as client:
-            if browser_page is not None:
-                client.browser_page = browser_page
             async for page in self.pages(client.get_collected_videos, "全部收藏", invalid_pages):
                 for item in normalize_page(page)["videos"]:
                     if not item["aweme_id"].isdigit():
