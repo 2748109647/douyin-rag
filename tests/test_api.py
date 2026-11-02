@@ -89,3 +89,41 @@ class ApiTest(TestCase):
         self.assertEqual(result.json()["asr_model"], "base")
         result = self.client.put("/api/settings", headers=self.headers, json={"asr_model": "unsupported"})
         self.assertEqual(result.status_code, 422)
+
+    def test_qr_login_auto_completes_and_keeps_browser_session(self):
+        browser = AsyncMock()
+        browser.login_state.side_effect = [
+            {"status": "waiting", "message": "等待扫码", "qr_image": "data:image/png;base64,c3ludGhldGlj"},
+            {"status": "authenticated", "message": "登录成功"},
+        ]
+        self.owner.writer_factory = lambda: browser
+        result = self.client.post("/api/browser/open", headers=self.headers)
+        self.assertEqual(result.json()["status"], "waiting")
+        self.assertEqual(result.headers["cache-control"], "no-store")
+        browser.open.assert_awaited_once_with(headless=True)
+        self.assertEqual(self.client.post("/api/scan", headers=self.headers).status_code, 409)
+        result = self.client.post("/api/browser/status", headers=self.headers)
+        self.assertEqual(result.json()["status"], "authenticated")
+        browser.save_login.assert_awaited_once()
+        browser.close.assert_not_awaited()
+        self.assertEqual(self.client.post("/api/browser/status", headers=self.headers).json(), result.json())
+        self.assertNotIn("qr_image", result.json())
+
+    def test_qr_refresh_cancel_verification_and_guards(self):
+        browser = AsyncMock()
+        browser.login_state.return_value = {"status": "expired", "message": "过期"}
+        self.owner.writer_factory = lambda: browser
+        for route in ("open", "status", "refresh", "visible", "cancel", "finish"):
+            self.assertEqual(self.client.post("/api/browser/" + route).status_code, 403)
+        self.client.post("/api/browser/open", headers=self.headers)
+        result = self.client.post("/api/browser/finish", headers=self.headers)
+        self.assertEqual(result.status_code, 400)
+        browser.save_login.assert_not_awaited()
+        self.assertEqual(self.client.post("/api/browser/refresh", headers=self.headers).json()["status"], "expired")
+        browser.page.reload.assert_awaited_once()
+        self.assertEqual(self.client.post("/api/browser/visible", headers=self.headers).json()["status"], "verifying")
+        self.assertEqual(browser.open.call_args.kwargs, {"headless": False})
+        self.assertEqual(self.client.post("/api/browser/cancel", headers=self.headers).json()["status"], "idle")
+        browser.close.assert_awaited_once()
+        self.assertEqual(self.client.post("/api/browser/refresh", headers=self.headers).status_code, 400)
+        self.assertEqual(self.client.post("/api/browser/status", headers=self.headers).json()["status"], "idle")

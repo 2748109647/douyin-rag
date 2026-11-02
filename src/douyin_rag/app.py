@@ -50,6 +50,8 @@ class ChatInput(BaseModel):
 def create_app(organizer=None):
     owner = organizer or Organizer()
     login_browser = None
+    login_lock = asyncio.Lock()
+    login_result = {"status": "idle", "message": "点击扫码登录，在当前页面连接抖音。"}
     shared_writer = None
     def writer_factory():
         nonlocal shared_writer
@@ -189,29 +191,81 @@ def create_app(organizer=None):
 
     @app.post("/api/browser/open")
     async def open_login():
-        nonlocal login_browser
-        owner.require_idle()
-        if login_browser:
-            await login_browser.close()
-        login_browser = owner.writer_factory()
-        # 在 UI 中由用户打开的交互式窗口，只加载已有状态或等待扫码，不自动操作收藏。
-        try:
-            cookies = owner.cookies()
-        except CollectionError:
-            cookies = ""
-        await login_browser.open(cookies)
-        return {"message": "请在抖音窗口完成登录或验证，然后回到这里点击完成登录。"}
+        nonlocal login_browser, login_result
+        async with login_lock:
+            owner.require_idle()
+            if login_browser:
+                await login_browser.close()
+            login_browser = owner.writer_factory()
+            try:
+                await login_browser.open(headless=True)
+                await login_browser.prepare_login()
+                login_result = await complete_login()
+            except Exception:
+                await login_browser.close()
+                login_browser = None
+                raise
+            return login_result
+
+    async def complete_login():
+        nonlocal login_browser, login_result
+        if not login_browser:
+            return login_result
+        login_result = await login_browser.login_state()
+        if login_result["status"] == "authenticated":
+            await login_browser.save_login()
+            # 保留扫码时的页面、存储和安全 SDK，后续扫描复用同一会话。
+            login_browser = None
+        return login_result
+
+    @app.post("/api/browser/status")
+    async def login_status():
+        async with login_lock:
+            owner.require_idle()
+            return await complete_login()
+
+    @app.post("/api/browser/refresh")
+    async def refresh_login():
+        async with login_lock:
+            owner.require_idle()
+            if not login_browser:
+                raise CollectionError("请先点击扫码登录。", "login_required")
+            await login_browser.page.reload(wait_until="domcontentloaded", timeout=45000)
+            await login_browser.prepare_login()
+            return await complete_login()
+
+    @app.post("/api/browser/visible")
+    async def visible_login():
+        nonlocal login_browser, login_result
+        async with login_lock:
+            owner.require_idle()
+            login_browser = login_browser or owner.writer_factory()
+            await login_browser.open(headless=False)
+            await login_browser.prepare_login()
+            login_result = {"status": "verifying", "message": "请在验证窗口完成操作；本页会自动检测结果。"}
+            return login_result
+
+    @app.post("/api/browser/cancel")
+    async def cancel_login():
+        nonlocal login_browser, login_result
+        async with login_lock:
+            owner.require_idle()
+            if login_browser:
+                await login_browser.close()
+            login_browser = None
+            login_result = {"status": "idle", "message": "已取消本次扫码登录。"}
+            return login_result
 
     @app.post("/api/browser/finish")
     async def finish_login():
-        nonlocal login_browser
-        owner.require_idle()
-        if not login_browser:
-            raise CollectionError("请先打开抖音登录窗口。", "login_required")
-        await login_browser.save_login()
-        await login_browser.close()
-        login_browser = None
-        return {"message": "本机登录状态已保存。请扫描收藏以核对账号和完整列表。"}
+        async with login_lock:
+            owner.require_idle()
+            if not login_browser:
+                raise CollectionError("请先点击扫码登录。", "login_required")
+            result = await complete_login()
+            if result["status"] != "authenticated":
+                raise CollectionError(result["message"], "login_required")
+            return result
 
     @app.get("/api/export")
     async def export(archive: str = ""):
