@@ -6,25 +6,31 @@
   <meta name="color-scheme" content="light">
   <meta name="description" content="在本机分类、预览和整理抖音收藏的视频与图文。">
   <title>拾藏 · 抖音收藏整理</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='none' stroke='%23b8336a' stroke-width='3' stroke-linejoin='round' d='M8 4h16v24l-8-5-8 5z'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='none' stroke='%23202429' stroke-width='3' stroke-linejoin='round' d='M8 4h16v24l-8-5-8 5z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar" id="sidebar" aria-label="主导航">
+    <header class="topbar">
+      <button class="icon-button menu-toggle" id="menu-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
       <a class="brand" href="#collections" aria-label="拾藏首页">
         <svg viewBox="0 0 32 40" aria-hidden="true"><path d="M5 3h22v33l-11-7-11 7z"/></svg>
-        <span><strong>拾藏</strong><small>抖音收藏整理</small></span>
+        <strong>拾藏</strong>
       </a>
+      <div id="topbar-content" class="topbar-content"></div>
+      <a class="icon-button topbar-settings" href="#settings" aria-label="连接与设置"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-.8 2.4-2 .9L4 5.8 2 9l1.7 1.7v2.6L2 15l2 3.2 2.2-.5 2 .9L9 21h4l.8-2.4 2-.9 2.2.5 2-3.2-1.7-1.7v-2.6L20 9l-2-3.2-2.2.5-2-.9L13 3z"/><circle cx="11" cy="12" r="3"/></svg></a>
+    </header>
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
       <nav id="navigation"></nav>
+      <div id="folder-navigation" class="folder-navigation"></div>
       <div class="sidebar-bottom">
         <a href="#settings" class="nav-item" data-nav="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-.8 2.4-2 .9L4 5.8 2 9l1.7 1.7v2.6L2 15l2 3.2 2.2-.5 2 .9L9 21h4l.8-2.4 2-.9 2.2.5 2-3.2-1.7-1.7v-2.6L20 9l-2-3.2-2.2.5-2-.9L13 3z"/><circle cx="11" cy="12" r="3"/></svg>连接与设置</a>
         <div class="connection"><span class="status-dot" id="connection-dot"></span><span id="connection-label">正在检查本机状态</span></div>
         <div class="sidebar-note" id="scan-stamp">运行在你的电脑上</div>
       </div>
     </aside>
-    <header class="mobile-bar"><button class="icon-button" id="menu-toggle" aria-label="打开导航" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><a href="#collections">拾藏</a><span>本机应用</span></header>
+    <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="关闭导航" hidden></button>
     <main class="canvas" id="main">
       <div id="workflow" class="workflow" aria-label="整理步骤"></div>
       <div id="job-banner" aria-live="polite"></div>
@@ -32,6 +38,10 @@
     </main>
   </div>
   <div id="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="work-dialog" class="work-dialog" aria-labelledby="work-dialog-title">
+    <div class="work-dialog-toolbar"><h2 id="work-dialog-title">作品详情</h2><button class="icon-button" data-action="close-detail" aria-label="关闭作品详情"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div id="work-dialog-content"></div>
+  </dialog>
   <dialog id="confirm-dialog" aria-labelledby="confirm-title">
     <form method="dialog">
       <div class="dialog-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
