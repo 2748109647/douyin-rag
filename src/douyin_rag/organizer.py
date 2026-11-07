@@ -191,11 +191,26 @@ class Organizer:
     async def pages(self, fetch, scope, invalid_pages):
         cursor, seen = 0, set()
         while True:
-            self.check_pause()
-            try:
-                page = await fetch(cursor=cursor, count=50)
-            except CollectionError as exc:
-                raise CollectionError(f"读取{scope}失败。{exc}", exc.code) from exc
+            for attempt in range(2):
+                self.check_pause()
+                try:
+                    page = await fetch(cursor=cursor, count=50)
+                    break
+                except CollectionError as exc:
+                    raise CollectionError(f"读取{scope}失败。{exc}", exc.code) from exc
+                except httpx.HTTPError as exc:
+                    if attempt == 0 and isinstance(
+                        exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+                    ):
+                        await asyncio.sleep(self.config()["interval"])
+                        continue
+                    if isinstance(exc, httpx.TimeoutException):
+                        reason = "请求超时"
+                    elif isinstance(exc, (httpx.ConnectError, httpx.ProxyError)):
+                        reason = "连接失败"
+                    else:
+                        reason = "网络传输异常"
+                    raise CollectionError(f"读取{scope}失败：{reason}。请检查连接后重新扫描。", "network_error") from exc
             if "has_more" not in page or "cursor" not in page:
                 raise CollectionError(f"{scope}缺少分页信息，未覆盖上次完整结果。", "incomplete_scan")
             hidden = {k: page[k] for k in ("invalid_item_count", "invalid_item_text", "is_clear_invalid_item") if k in page}

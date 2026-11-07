@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import httpx
 
@@ -62,6 +62,51 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             await self.owner.scan()
         self.assertEqual(self.owner.data["snapshot"], previous)
 
+    async def test_scan_retries_timed_out_page_without_restarting_pagination(self):
+        fetch = AsyncMock(side_effect=[
+            {"aweme_list": [raw("1")], "cursor": 5, "has_more": True},
+            httpx.ReadTimeout("synthetic timeout"),
+            {"aweme_list": [raw("2")], "cursor": 5, "has_more": False},
+        ])
+        with patch.object(FakeClient, "get_collected_videos", fetch), patch(
+            "douyin_rag.organizer.asyncio.sleep", new=AsyncMock()
+        ):
+            self.owner.start("scan", self.owner.scan)
+            await self.owner.task
+        self.assertEqual(fetch.await_args_list, [call(cursor=0, count=50), call(cursor=5, count=50), call(cursor=5, count=50)])
+        self.assertEqual(self.owner.job["status"], "completed")
+        self.assertTrue({"1", "2"} <= {item["aweme_id"] for item in self.owner.data["snapshot"]["items"]})
+
+    async def test_scan_reports_network_failure_after_one_retry_and_preserves_snapshot(self):
+        previous = {"id": "last-good", "complete": True}
+        self.owner.data["snapshot"] = previous
+        fetch = AsyncMock(side_effect=httpx.ConnectError("synthetic private request details"))
+        with patch.object(FakeClient, "get_collection_folders", fetch), patch(
+            "douyin_rag.organizer.asyncio.sleep", new=AsyncMock()
+        ):
+            self.owner.start("scan", self.owner.scan)
+            await self.owner.task
+        self.assertEqual(fetch.await_args_list, [call(cursor=0, count=50)] * 2)
+        self.assertEqual(self.owner.job["status"], "failed")
+        self.assertEqual(self.owner.job["error_code"], "network_error")
+        self.assertEqual(self.owner.job["message"], "读取收藏夹失败：连接失败。请检查连接后重新扫描。")
+        self.assertEqual(self.owner.data["snapshot"], previous)
+
+    async def test_scan_honors_pause_before_retry(self):
+        fetch = AsyncMock(side_effect=httpx.ReadTimeout("synthetic timeout"))
+
+        async def pause_during_wait(_interval):
+            self.owner.pause()
+
+        with patch.object(FakeClient, "get_collected_videos", fetch), patch(
+            "douyin_rag.organizer.asyncio.sleep", new=pause_during_wait
+        ):
+            self.owner.start("scan", self.owner.scan)
+            await self.owner.task
+        fetch.assert_awaited_once_with(cursor=0, count=50)
+        self.assertEqual(self.owner.job["status"], "paused")
+        self.assertIsNone(self.owner.data["snapshot"])
+
     async def test_rejected_collection_page_reports_stage_and_preserves_snapshot(self):
         previous = {"id": "last-good", "complete": True}
         self.owner.data["snapshot"] = previous
@@ -74,7 +119,8 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             ("get_collection_folders", "收藏夹"),
             ("get_collection_videos", "收藏夹 原夹"),
         ):
-            with self.subTest(stage=stage), patch.object(FakeClient, method, reject), patch(
+            fetch = AsyncMock(side_effect=reject)
+            with self.subTest(stage=stage), patch.object(FakeClient, method, fetch), patch(
                 "douyin_rag.organizer.asyncio.sleep", new=AsyncMock()
             ):
                 self.owner.start("scan", self.owner.scan)
@@ -84,6 +130,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
                 self.assertIn(f"读取{stage}失败", self.owner.job["message"])
                 self.assertIn("status_code=5", self.owner.job["message"])
                 self.assertEqual(self.owner.data["snapshot"], previous)
+                fetch.assert_awaited_once()
 
     async def test_local_login_scan_uses_http_client_without_opening_browser(self):
         del self.owner.cookies  # Use the real selection logic with synthetic files.
