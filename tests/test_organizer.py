@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from douyin_rag.collections import CollectionError
+from douyin_rag.collections import CollectionClient, CollectionError
 from douyin_rag.organizer import Organizer, demo_data
 
 
@@ -62,25 +62,67 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             await self.owner.scan()
         self.assertEqual(self.owner.data["snapshot"], previous)
 
+    async def test_rejected_collection_page_reports_stage_and_preserves_snapshot(self):
+        previous = {"id": "last-good", "complete": True}
+        self.owner.data["snapshot"] = previous
+
+        async def reject(*args, **kwargs):
+            return CollectionClient._validate_collection_response({"status_code": 5}, "")
+
+        for method, stage in (
+            ("get_collected_videos", "全部收藏"),
+            ("get_collection_folders", "收藏夹"),
+            ("get_collection_videos", "收藏夹 原夹"),
+        ):
+            with self.subTest(stage=stage), patch.object(FakeClient, method, reject), patch(
+                "douyin_rag.organizer.asyncio.sleep", new=AsyncMock()
+            ):
+                self.owner.start("scan", self.owner.scan)
+                await self.owner.task
+                self.assertEqual(self.owner.job["status"], "failed")
+                self.assertEqual(self.owner.job["error_code"], "collection_error")
+                self.assertIn(f"读取{stage}失败", self.owner.job["message"])
+                self.assertIn("status_code=5", self.owner.job["message"])
+                self.assertEqual(self.owner.data["snapshot"], previous)
+
     async def test_local_login_scan_uses_http_client_without_opening_browser(self):
+        del self.owner.cookies  # Use the real selection logic with synthetic files.
         browser = AsyncMock()
         self.owner.writer_factory = lambda: browser
-        (self.owner.root / "login.cookies").write_text("sessionid=synthetic", encoding="utf-8")
+        app_cookie = self.owner.root / "login.cookies"
+        app_cookie.write_text("sessionid=app-session", encoding="utf-8")
+        default_dir = self.owner.root / "douyinmcp"
+        default_dir.mkdir()
+        (default_dir / "cookies.txt").write_text("sessionid=default-session", encoding="utf-8")
+        external_cookie = self.owner.root / "external.cookies"
+        external_cookie.write_text("sessionid=external-session", encoding="utf-8")
         clients = []
         def factory(cookies):
             client = FakeClient(cookies)
             clients.append((cookies, client))
             return client
         self.owner.client_factory = factory
-        with patch.dict("os.environ", {"DOUYIN_COOKIE": "", "DOUYIN_COOKIE_PATH": ""}), patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+        environment = {"DOUYIN_COOKIE": "", "DOUYIN_COOKIE_PATH": "", "XDG_CONFIG_HOME": str(self.owner.root)}
+        with patch.dict("os.environ", environment), patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
             await self.owner.scan()
             self.assertFalse(hasattr(clients[-1][1], "browser_page"))
-            self.assertEqual(clients[-1][0], "sessionid=synthetic")
-            self.owner.settings["cookie_path"] = "external.cookies"
+            self.assertEqual(clients[-1][0], "sessionid=app-session")
+            self.owner.settings["cookie_path"] = str(external_cookie)
             await self.owner.scan()
             self.assertFalse(hasattr(clients[-1][1], "browser_page"))
-            browser.open.assert_not_awaited()
-            browser.cookies.assert_not_awaited()
+            self.assertEqual(clients[-1][0], "sessionid=external-session")
+            self.owner.settings["cookie_path"] = str(self.owner.root / "missing.cookies")
+            with self.assertRaises(CollectionError):
+                self.owner.cookies()
+            self.owner.settings["cookie_path"] = ""
+            with patch.dict("os.environ", {"DOUYIN_COOKIE_PATH": str(external_cookie)}):
+                self.assertEqual(self.owner.cookies(), "sessionid=external-session")
+            with patch.dict("os.environ", {"DOUYIN_COOKIE": "sessionid=env-session"}):
+                self.assertEqual(self.owner.cookies(), "sessionid=env-session")
+            app_cookie.write_text("ttwid=invalid-session", encoding="utf-8")
+            self.assertEqual(self.owner.cookies(), "sessionid=default-session")
+        browser.open.assert_not_awaited()
+        browser.cookies.assert_not_awaited()
 
     async def test_model_protocol_fences_and_error_redaction(self):
         def reply(request):

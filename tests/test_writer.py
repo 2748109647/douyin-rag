@@ -53,7 +53,9 @@ class WriterTest(IsolatedAsyncioTestCase):
             writer.qr_element.return_value = None
             writer.cookies = AsyncMock(return_value="sessionid=synthetic")
             with patch("douyin_rag.writer.CollectionClient", side_effect=AssertionError("Login must not read collections")) as factory:
-                self.assertEqual((await writer.login_state())["status"], "authenticated")
+                result = await writer.login_state()
+                self.assertEqual(result["status"], "authenticated")
+                self.assertIn("扫描时确认收藏能否读取", result["message"])
                 # 手机确认后，即使页面二维码尚未消失，也不阻塞登录完成。
                 writer.qr_element.return_value = qr
                 self.assertEqual((await writer.login_state())["status"], "authenticated")

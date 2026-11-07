@@ -91,12 +91,12 @@ class Organizer:
 
     def cookies(self):
         configured = self.config()["cookie_path"]
-        try:
+        if configured or os.getenv("DOUYIN_COOKIE") or os.getenv("DOUYIN_COOKIE_PATH"):
             return load_cookies(configured)
-        except CollectionError:
-            if configured or os.getenv("DOUYIN_COOKIE") or os.getenv("DOUYIN_COOKIE_PATH"):
-                raise
+        try:
             return load_cookies(str(self.root / "login.cookies"))
+        except CollectionError:
+            return load_cookies()
 
     @staticmethod
     def account_marker(cookies):
@@ -192,7 +192,10 @@ class Organizer:
         cursor, seen = 0, set()
         while True:
             self.check_pause()
-            page = await fetch(cursor=cursor, count=50)
+            try:
+                page = await fetch(cursor=cursor, count=50)
+            except CollectionError as exc:
+                raise CollectionError(f"读取{scope}失败。{exc}", exc.code) from exc
             if "has_more" not in page or "cursor" not in page:
                 raise CollectionError(f"{scope}缺少分页信息，未覆盖上次完整结果。", "incomplete_scan")
             hidden = {k: page[k] for k in ("invalid_item_count", "invalid_item_text", "is_clear_invalid_item") if k in page}

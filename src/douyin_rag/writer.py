@@ -99,7 +99,7 @@ class BrowserWriter:
             except CollectionError:
                 pass
             else:
-                return {"status": "authenticated", "message": "登录成功，可以使用收藏了。"}
+                return {"status": "authenticated", "message": "已保存登录状态，扫描时确认收藏能否读取。"}
             qr = await self.qr_element()
             if qr:
                 expired = self.page.get_by_text(re.compile(r"二维码.*(失效|过期)|点击刷新|刷新二维码"))
