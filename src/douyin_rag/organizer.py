@@ -188,13 +188,13 @@ class Organizer:
         plan = self.data.get("plan")
         return {"snapshot": snapshot, "plan": plan, "job": self.job, "history": self.data.get("history", []), "archives": self.data.get("archives", []), "settings": self.public_settings()}
 
-    async def pages(self, fetch, scope, invalid_pages):
+    async def pages(self, fetch, scope, invalid_pages, *, count=50):
         cursor, seen = 0, set()
         while True:
             for attempt in range(2):
                 self.check_pause()
                 try:
-                    page = await fetch(cursor=cursor, count=50)
+                    page = await fetch(cursor=cursor, count=count)
                     break
                 except CollectionError as exc:
                     raise CollectionError(f"读取{scope}失败。{exc}", exc.code) from exc
@@ -230,7 +230,8 @@ class Organizer:
         cookies = self.cookies()
         invalid_pages, folders, works = [], {}, {}
         async with self.client_factory(cookies) as client:
-            async for page in self.pages(client.get_collected_videos, "全部收藏", invalid_pages):
+            # 全部收藏接口实测拒绝每页 50 条，沿用 douyin-mcp 的默认页大小。
+            async for page in self.pages(client.get_collected_videos, "全部收藏", invalid_pages, count=20):
                 for item in normalize_page(page)["videos"]:
                     if not item["aweme_id"].isdigit():
                         raise CollectionError("收藏响应包含无法识别的作品 ID，扫描未完成。", "incomplete_scan")

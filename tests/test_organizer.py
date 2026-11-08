@@ -73,7 +73,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         ):
             self.owner.start("scan", self.owner.scan)
             await self.owner.task
-        self.assertEqual(fetch.await_args_list, [call(cursor=0, count=50), call(cursor=5, count=50), call(cursor=5, count=50)])
+        self.assertEqual(fetch.await_args_list, [call(cursor=0, count=20), call(cursor=5, count=20), call(cursor=5, count=20)])
         self.assertEqual(self.owner.job["status"], "completed")
         self.assertTrue({"1", "2"} <= {item["aweme_id"] for item in self.owner.data["snapshot"]["items"]})
 
@@ -103,7 +103,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         ):
             self.owner.start("scan", self.owner.scan)
             await self.owner.task
-        fetch.assert_awaited_once_with(cursor=0, count=50)
+        fetch.assert_awaited_once_with(cursor=0, count=20)
         self.assertEqual(self.owner.job["status"], "paused")
         self.assertIsNone(self.owner.data["snapshot"])
 
