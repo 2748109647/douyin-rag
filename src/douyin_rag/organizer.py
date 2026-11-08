@@ -390,12 +390,18 @@ class Organizer:
                     {"role": "user", "content": json.dumps({"categories": plan["categories"], "format": {"items": [{"aweme_id": "原ID字符串", "category": "给定分类", "reason": "根据标题判断的理由", "confidence": 0.9}]}, "items": [{"aweme_id": i["aweme_id"], "title": i["title"][:800], "author": i["author"][:80], "kind": i["kind"]} for i in batch]}, ensure_ascii=False)},
                 ], stage, lambda response: self._valid_assignments(response, batch, plan["categories"]))
             except CollectionError as exc:
-                if exc.code != "model_output_error" or len(batch) == 1:
+                if len(batch) == 1:
+                    raise
+                if exc.code == "model_output_error":
+                    reason = "模型结果多次未通过校验"
+                elif exc.code == "network_error" and isinstance(exc.__cause__, httpx.ReadTimeout):
+                    reason = "模型响应多次读取超时"
+                else:
                     raise
                 middle = len(batch) // 2
                 pending.appendleft(batch[middle:])
                 pending.appendleft(batch[:middle])
-                self.progress(f"{stage}：模型结果多次未通过校验，正在拆成更小的批次。")
+                self.progress(f"{stage}：{reason}，正在拆成更小的批次。")
                 continue
             plan["assignments"].update(updates)
             self.persist()

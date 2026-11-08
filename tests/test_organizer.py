@@ -196,34 +196,51 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.owner.data["plan"]["assignments"], {})
         self.assertEqual(self.owner.data["plan"]["phase"], "classifying")
 
-    async def test_classification_splits_a_repeatedly_invalid_batch_and_saves_each_valid_half(self):
+    async def test_classification_saves_smaller_batches_after_output_errors_or_read_timeouts(self):
+        for read_timeout in (False, True):
+            with self.subTest(read_timeout=read_timeout):
+                snapshot, plan = demo_data()
+                snapshot["demo"] = False
+                plan.update(phase="classifying", assignments={})
+                self.owner.data.update(snapshot=snapshot, plan=plan)
+                ids = [item["aweme_id"] for item in snapshot["items"]]
+                half = len(ids) // 2
+                submitted = []
+
+                async def reply(messages):
+                    batch = [item["aweme_id"] for item in json.loads(messages[-1]["content"])["items"]]
+                    submitted.append(batch)
+                    if batch == ids:
+                        if read_timeout:
+                            raise httpx.ReadTimeout("synthetic timeout")
+                        return {"items": []}
+                    if batch == ids[half:]:
+                        saved = self.owner.read("workspace", {})["plan"]["assignments"]
+                        self.assertEqual(list(saved), ids[:half])
+                    return {"items": [
+                        {"aweme_id": item_id, "category": "待复核", "confidence": .3, "reason": "合成理由"}
+                        for item_id in batch
+                    ]}
+
+                self.owner.model_json = reply
+                with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+                    await self.owner.classify()
+                self.assertEqual(submitted, [ids, ids, ids, ids[:half], ids[half:]])
+                self.assertEqual(list(plan["assignments"]), ids)
+                self.assertEqual(plan["phase"], "ready")
+
+    async def test_classification_does_not_split_when_connection_times_out(self):
         snapshot, plan = demo_data()
         snapshot["demo"] = False
         plan.update(phase="classifying", assignments={})
         self.owner.data.update(snapshot=snapshot, plan=plan)
-        ids = [item["aweme_id"] for item in snapshot["items"]]
-        half = len(ids) // 2
-        submitted = []
-
-        async def reply(messages):
-            batch = [item["aweme_id"] for item in json.loads(messages[-1]["content"])["items"]]
-            submitted.append(batch)
-            if batch == ids:
-                return {"items": []}
-            if batch == ids[half:]:
-                saved = self.owner.read("workspace", {})["plan"]["assignments"]
-                self.assertEqual(list(saved), ids[:half])
-            return {"items": [
-                {"aweme_id": item_id, "category": "待复核", "confidence": .3, "reason": "合成理由"}
-                for item_id in batch
-            ]}
-
-        self.owner.model_json = reply
+        self.owner.model_json = AsyncMock(side_effect=httpx.ConnectTimeout("synthetic timeout"))
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
-            await self.owner.classify()
-        self.assertEqual(submitted, [ids, ids, ids, ids[:half], ids[half:]])
-        self.assertEqual(list(plan["assignments"]), ids)
-        self.assertEqual(plan["phase"], "ready")
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.classify()
+        self.assertEqual(caught.exception.code, "network_error")
+        self.assertEqual(self.owner.model_json.await_count, 3)
+        self.assertEqual(plan["assignments"], {})
 
     async def test_classification_resume_retries_only_the_unsaved_batch(self):
         snapshot, plan = demo_data()
