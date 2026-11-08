@@ -184,6 +184,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
     async def test_missing_model_rows_never_commits_incomplete_batch(self):
         snapshot, _ = demo_data()
         snapshot["demo"] = False
+        snapshot["items"] = snapshot["items"][:1]
         self.owner.data["snapshot"] = snapshot
         self.owner.model_json = AsyncMock(side_effect=[{"categories": ["知识", "待复核"]}, *([{"items": []}] * 3)])
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()) as delay:
@@ -194,6 +195,35 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(delay.await_args_list, [call(2), call(4)])
         self.assertEqual(self.owner.data["plan"]["assignments"], {})
         self.assertEqual(self.owner.data["plan"]["phase"], "classifying")
+
+    async def test_classification_splits_a_repeatedly_invalid_batch_and_saves_each_valid_half(self):
+        snapshot, plan = demo_data()
+        snapshot["demo"] = False
+        plan.update(phase="classifying", assignments={})
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        ids = [item["aweme_id"] for item in snapshot["items"]]
+        half = len(ids) // 2
+        submitted = []
+
+        async def reply(messages):
+            batch = [item["aweme_id"] for item in json.loads(messages[-1]["content"])["items"]]
+            submitted.append(batch)
+            if batch == ids:
+                return {"items": []}
+            if batch == ids[half:]:
+                saved = self.owner.read("workspace", {})["plan"]["assignments"]
+                self.assertEqual(list(saved), ids[:half])
+            return {"items": [
+                {"aweme_id": item_id, "category": "待复核", "confidence": .3, "reason": "合成理由"}
+                for item_id in batch
+            ]}
+
+        self.owner.model_json = reply
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+            await self.owner.classify()
+        self.assertEqual(submitted, [ids, ids, ids, ids[:half], ids[half:]])
+        self.assertEqual(list(plan["assignments"]), ids)
+        self.assertEqual(plan["phase"], "ready")
 
     async def test_classification_resume_retries_only_the_unsaved_batch(self):
         snapshot, plan = demo_data()
