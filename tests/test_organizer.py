@@ -191,19 +191,62 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.owner.data["plan"]["assignments"], {})
         self.assertEqual(self.owner.data["plan"]["phase"], "classifying")
 
-    async def test_classification_resume_skips_saved_batches(self):
+    async def test_classification_resume_retries_only_the_unsaved_batch(self):
         snapshot, plan = demo_data()
         snapshot["demo"] = False
         plan["phase"] = "classifying"
         last = snapshot["items"][-1]["aweme_id"]
         plan["assignments"].pop(last)
         self.owner.data.update(snapshot=snapshot, plan=plan)
-        self.owner.model_json = AsyncMock(return_value={"items": [{"aweme_id": last, "category": "待复核", "confidence": .3, "reason": "合成理由"}]})
-        await self.owner.classify()
+        self.owner.model_json = AsyncMock(side_effect=[
+            httpx.ReadTimeout("synthetic timeout"),
+            {"items": [{"aweme_id": last, "category": "待复核", "confidence": .3, "reason": "合成理由"}]},
+        ])
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()) as delay:
+            await self.owner.classify()
         self.assertEqual(self.owner.data["plan"]["phase"], "ready")
         self.assertEqual(len(plan["assignments"]), len(snapshot["items"]))
+        delay.assert_awaited_once_with(2)
+        first, second = self.owner.model_json.await_args_list
+        self.assertEqual(first, second)
         sent = self.owner.model_json.call_args.args[0][-1]["content"]
-        self.assertEqual(len(json.loads(sent)["items"]), 1)
+        self.assertEqual([item["aweme_id"] for item in json.loads(sent)["items"]], [last])
+
+    async def test_classification_retry_exhaustion_reports_stage_and_keeps_checkpoint(self):
+        snapshot, plan = demo_data()
+        snapshot["demo"] = False
+        plan["phase"] = "classifying"
+        plan["assignments"].pop(snapshot["items"][-1]["aweme_id"])
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        self.owner.persist()
+        self.owner.model_json = AsyncMock(side_effect=httpx.ReadTimeout("synthetic private details"))
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()) as delay:
+            self.owner.start("classify", self.owner.classify)
+            await self.owner.task
+        self.assertEqual(self.owner.model_json.await_count, 3)
+        self.assertEqual(delay.await_args_list, [call(2), call(4)])
+        self.assertEqual(self.owner.job["status"], "failed")
+        self.assertEqual(self.owner.job["error_code"], "network_error")
+        total = len(snapshot["items"])
+        self.assertEqual(self.owner.job["processed"], total - 1)
+        self.assertEqual(self.owner.job["message"], f"归类作品 {total}–{total}失败：模型请求超时。进度已保存，可继续分类。")
+        self.assertEqual(Organizer(self.temp.name).data["plan"], plan)
+
+    async def test_classification_can_pause_before_retrying_category_names(self):
+        snapshot, _ = demo_data()
+        snapshot["demo"] = False
+        self.owner.data["snapshot"] = snapshot
+        self.owner.model_json = AsyncMock(side_effect=httpx.ConnectError("synthetic connection error"))
+
+        async def pause_during_wait(_delay):
+            self.owner.pause()
+
+        with patch("douyin_rag.organizer.asyncio.sleep", new=pause_during_wait):
+            self.owner.start("classify", self.owner.classify)
+            await self.owner.task
+        self.owner.model_json.assert_awaited_once()
+        self.assertEqual(self.owner.job["status"], "paused")
+        self.assertIsNone(self.owner.data["plan"])
 
     async def test_rename_and_revision_guard(self):
         self.owner.use_demo()
