@@ -185,9 +185,13 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         snapshot, _ = demo_data()
         snapshot["demo"] = False
         self.owner.data["snapshot"] = snapshot
-        self.owner.model_json = AsyncMock(side_effect=[{"categories": ["知识", "待复核"]}, {"items": []}])
-        with self.assertRaises(CollectionError):
-            await self.owner.classify()
+        self.owner.model_json = AsyncMock(side_effect=[{"categories": ["知识", "待复核"]}, *([{"items": []}] * 3)])
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()) as delay:
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.classify()
+        self.assertEqual(caught.exception.code, "model_output_error")
+        self.assertEqual(self.owner.model_json.await_count, 4)
+        self.assertEqual(delay.await_args_list, [call(2), call(4)])
         self.assertEqual(self.owner.data["plan"]["assignments"], {})
         self.assertEqual(self.owner.data["plan"]["phase"], "classifying")
 
@@ -200,15 +204,16 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.owner.data.update(snapshot=snapshot, plan=plan)
         self.owner.model_json = AsyncMock(side_effect=[
             httpx.ReadTimeout("synthetic timeout"),
+            {"items": [{"aweme_id": [], "category": "待复核", "confidence": .3, "reason": "合成理由"}]},
             {"items": [{"aweme_id": last, "category": "待复核", "confidence": .3, "reason": "合成理由"}]},
         ])
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()) as delay:
             await self.owner.classify()
         self.assertEqual(self.owner.data["plan"]["phase"], "ready")
         self.assertEqual(len(plan["assignments"]), len(snapshot["items"]))
-        delay.assert_awaited_once_with(2)
-        first, second = self.owner.model_json.await_args_list
-        self.assertEqual(first, second)
+        self.assertEqual(delay.await_args_list, [call(2), call(4)])
+        first, second, third = self.owner.model_json.await_args_list
+        self.assertEqual([second, third], [first, first])
         sent = self.owner.model_json.call_args.args[0][-1]["content"]
         self.assertEqual([item["aweme_id"] for item in json.loads(sent)["items"]], [last])
 
