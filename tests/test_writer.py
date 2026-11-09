@@ -172,21 +172,30 @@ class WriterTest(IsolatedAsyncioTestCase):
                     patch("douyin_rag.ego_writer.subprocess.run") as run:
                 run.return_value.stdout = b''
                 run.return_value.stderr = b'SHICANG_EGO {"spaceId": 9, "handedOff": false}\r\n'
-                await writer.move_request("9", target="123", name="合成夹")
+                item_ids = ["90071992547409931", "90071992547409932"]
+                await writer.move_request(item_ids, target="123", name="合成夹")
                 self.assertEqual(run.call_args.args[0], ["ego-browser", "nodejs"])
                 source = run.call_args.kwargs["input"].decode("utf-8")
                 payload = json.loads(source.splitlines()[0].removeprefix("const input = ").removesuffix(";"))
                 self.assertEqual(payload["operation"], "move")
                 self.assertEqual(payload["sessionMarker"], "synthetic-marker")
-                self.assertEqual(payload["params"]["item_ids"], "9")
+                self.assertEqual(payload["params"]["item_ids"], item_ids)
                 self.assertEqual(payload["params"]["to_collects_id"], "123")
                 self.assertIn("/aweme/v1/web/collects/video/move/", source)
                 self.assertNotIn("synthetic-private", source)
                 self.assertNotIn("DOUYIN_COOKIE", run.call_args.kwargs["env"])
-                run.return_value.stderr = b'SHICANG_EGO {"spaceId": 9, "error": "write_rejected"}'
+                run.return_value.stderr = b'SHICANG_EGO {"spaceId": 9, "error": "write_rejected", "platformStatus": 42, "raw": "private-payload"}'
                 with self.assertRaises(CollectionError) as caught:
-                    await writer.move_request("9", target="123")
+                    await writer.move_request(item_ids, target="123")
                 self.assertEqual(caught.exception.code, "write_rejected")
+                self.assertIn("42", str(caught.exception))
+                self.assertNotIn("private-payload", str(caught.exception))
+                run.return_value.stderr = b'SHICANG_EGO {"spaceId": 9, "error": "browser_attention", "httpStatus": 429, "handedOff": true}'
+                with self.assertRaises(CollectionError) as caught:
+                    await writer.move_request(item_ids, target="123")
+                self.assertEqual(caught.exception.code, "browser_attention")
+                self.assertIn("HTTP 429", str(caught.exception))
+                self.assertTrue(writer.handed_off)
 
     async def test_missing_cli_and_write_timeout_have_distinct_results(self):
         with TemporaryDirectory() as directory:
@@ -200,7 +209,7 @@ class WriterTest(IsolatedAsyncioTestCase):
                 self.assertEqual(caught.exception.code, "browser_unavailable")
             with patch("douyin_rag.ego_writer.subprocess.run", side_effect=subprocess.TimeoutExpired("ego-browser", 35)):
                 with self.assertRaises(CollectionError) as caught:
-                    await writer.move_request("9", target="123")
+                    await writer.move_request(["9"], target="123")
                 self.assertEqual(caught.exception.code, "write_unconfirmed")
 
     async def test_continue_takes_back_the_same_handed_off_space(self):

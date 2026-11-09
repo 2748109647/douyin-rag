@@ -17,6 +17,11 @@ import httpx
 from .collections import CollectionClient, CollectionError, load_cookies, normalize_page
 
 
+MOVE_PROBE_SIZE = 3
+MOVE_BATCH_SIZE = 10
+MIN_MOVE_BATCH_INTERVAL = 5
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -469,18 +474,21 @@ class Organizer:
         if self.writer_factory is None:
             raise CollectionError("整理执行器未连接。", "writer_unavailable")
         writer = self.writer_factory()
-        operations = plan["operations"]
         interval = self.config()["interval"]
-        done = sum(operation["status"] == "completed" for operation in operations.values())
+        done = sum(operation["status"] == "completed" for operation in plan["operations"].values())
+        by_category = {}
+        for item in snapshot["items"]:
+            item_id = item["aweme_id"]
+            category = plan["assignments"][item_id]["category"]
+            by_category.setdefault(category, {})[item_id] = item["original_folders"]
         keep_browser_open = False
         plan["phase"] = "applying"
         self.persist()
         try:
             self.progress("正在核对抖音账号", done, len(expected))
             await writer.open(cookies)
-            used = set(a["category"] for a in plan["assignments"].values())
             for category in plan["categories"]:
-                if category not in used:
+                if category not in by_category:
                     continue
                 self.check_pause()
                 # 总是先查询，解决建夹成功后进程中断但未记录 ID 的情况。
@@ -492,30 +500,8 @@ class Organizer:
                 plan["folder_ids"][category] = folder_id
                 self.persist()
                 self.progress(f"目标收藏夹已就绪：{category}")
-            initial_members = {}
-            prepared = done
-            for item in snapshot["items"]:
-                self.check_pause()
-                item_id = item["aweme_id"]
-                category = plan["assignments"][item_id]["category"]
-                target = plan["folder_ids"][category]
-                operation = operations.get(item_id)
-                if operation and operation["status"] == "completed":
-                    continue
-                if target not in initial_members:
-                    # 每个目标夹只读一次，覆盖已归属作品和上轮可能成功的写入。
-                    initial_members[target] = await writer.members(target)
-                    self.check_pause()
-                operations[item_id] = {"status": "inflight", "target": target, "category": category, "original_folders": item["original_folders"], "started_at": now()}
-                self.persist()
-                needs_move = item_id not in initial_members[target]
-                if needs_move:
-                    await writer.move_request(item_id, target=target, name=category)
-                prepared += 1
-                self.progress(f"已处理 {prepared} / {len(expected)} 个作品的移入步骤，等待统一核对")
-                if needs_move:
-                    await asyncio.sleep(interval)
-            await self.verify_moves(writer, snapshot["items"], plan, interval)
+            await self.move_batches(writer, by_category, plan, done, len(expected), interval)
+            await self.verify_moves(writer, by_category, plan, interval)
             plan["phase"] = "completed"
             self.progress("全部可读作品已整理，目标收藏夹成员核对通过。", len(expected), len(expected))
         except CollectionError as exc:
@@ -531,14 +517,51 @@ class Organizer:
             if not keep_browser_open:
                 await writer.close()
 
-    async def verify_moves(self, writer, items, plan, interval):
+    async def move_batches(self, writer, by_category, plan, prepared, total, interval):
         operations = plan["operations"]
-        by_category = {}
-        for item in items:
-            item_id = item["aweme_id"]
-            category = plan["assignments"][item_id]["category"]
-            by_category.setdefault(category, {})[item_id] = item["original_folders"]
+        batch_size = MOVE_PROBE_SIZE
+        for category, items in by_category.items():
+            self.check_pause()
+            target = plan["folder_ids"][category]
+            records = {
+                item_id: {
+                    "status": "inflight", "target": target, "category": category,
+                    "original_folders": old_folders, "started_at": now(),
+                }
+                for item_id, old_folders in items.items()
+                if operations.get(item_id, {}).get("status") != "completed"
+            }
+            if not records:
+                continue
+            # 包括上次可能已成功的写入，续跑只提交目标夹仍缺少的作品。
+            present = records.keys() & await writer.members(target)
+            self.check_pause()
+            if present:
+                operations.update((item_id, records[item_id]) for item_id in present)
+                self.persist()
+                prepared += len(present)
+                self.progress(f"已处理 {prepared} / {total} 个作品的移入步骤，等待统一核对")
+            missing = [item_id for item_id in records if item_id not in present]
+            offset = 0
+            while offset < len(missing):
+                self.check_pause()
+                batch = missing[offset:offset + batch_size]
+                operations.update((item_id, records[item_id]) for item_id in batch)
+                self.persist()
+                await writer.move_request(batch, target=target, name=category)
+                await asyncio.sleep(max(interval, MIN_MOVE_BATCH_INTERVAL))
+                self.check_pause()
+                if batch_size == MOVE_PROBE_SIZE:
+                    if not set(batch) <= await writer.members(target):
+                        raise CollectionError("首批移入后有作品未在目标夹中确认，已保留记录，可继续整理。", "verification_failed")
+                    if len(batch) > 1:
+                        batch_size = MOVE_BATCH_SIZE
+                offset += len(batch)
+                prepared += len(batch)
+                self.progress(f"已处理 {prepared} / {total} 个作品的移入步骤，等待统一核对")
 
+    async def verify_moves(self, writer, by_category, plan, interval):
+        operations = plan["operations"]
         self.progress("正在统一核对目标收藏夹")
         missing_category = None
         old_memberships = {}
@@ -578,7 +601,7 @@ class Organizer:
             pending = item_ids & await writer.members(old)
             for item_id in sorted(pending):
                 self.check_pause()
-                await writer.move_request(item_id, source=old)
+                await writer.move_request([item_id], source=old)
                 removed.add(item_id)
                 await asyncio.sleep(interval)
             self.check_pause()

@@ -321,13 +321,14 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             async def open(inner, cookies): pass
             async def close(inner): pass
             async def ensure_folder(inner, name): return str(plan["categories"].index(name)+1)
-            async def move_request(inner, item_id, target=None, name="", source=None):
-                self.assertEqual(plan["operations"][item_id]["status"], "inflight")
+            async def move_request(inner, item_ids, target=None, name="", source=None):
+                for item_id in item_ids:
+                    self.assertEqual(plan["operations"][item_id]["status"], "inflight")
                 events.append(("add" if target else "remove", target or source))
                 if target:
-                    memberships.setdefault(target, set()).add(item_id)
+                    memberships.setdefault(target, set()).update(item_ids)
                 else:
-                    memberships[source].remove(item_id)
+                    memberships[source].difference_update(item_ids)
             async def members(inner, folder):
                 events.append(("read", folder))
                 return memberships.get(folder, set()).copy()
@@ -336,15 +337,16 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             await self.owner.execute(plan["id"], plan["revision"])
         self.assertEqual(plan["phase"], "completed")
         self.assertTrue(all(operation["status"] == "completed" for operation in plan["operations"].values()))
-        self.assertEqual(sum(kind == "add" for kind, _ in events), len(snapshot["items"]))
         self.assertEqual(sum(kind == "remove" for kind, _ in events), len(old_items))
         final_add = max(index for index, event in enumerate(events) if event[0] == "add")
         first_remove = next(index for index, event in enumerate(events) if event[0] == "remove")
         targets = set(plan["folder_ids"].values())
+        probe_target = next(folder for kind, folder in events if kind == "add")
+        self.assertCountEqual([folder for kind, folder in events if kind == "add"], targets)
         cleared_targets = {plan["folder_ids"][plan["assignments"][item_id]["category"]] for item_id in old_items}
         self.assertEqual({folder for kind, folder in events[final_add+1:first_remove] if kind == "read"}, targets | {"demo-old"})
         for folder in targets | {"demo-old"}:
-            self.assertEqual(events.count(("read", folder)), 3 if folder in cleared_targets else 2)
+            self.assertEqual(events.count(("read", folder)), 2 + (folder in cleared_targets) + (folder == probe_target))
         plan["phase"] = "partial"
         events.clear()
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
@@ -360,7 +362,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.owner.data.update(snapshot=snapshot, plan=plan)
         writer = AsyncMock()
         writer.ensure_folder.return_value = "123"
-        writer.members.return_value = set()
+        writer.members.side_effect = [set(), {item_id}, set(), set()]
         self.owner.writer_factory = lambda: writer
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(CollectionError) as caught:
@@ -368,8 +370,8 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "verification_failed")
         self.assertEqual(plan["operations"][item_id]["status"], "unconfirmed")
         self.assertEqual(plan["phase"], "partial")
-        writer.move_request.assert_awaited_once_with(item_id, target="123", name=plan["assignments"][item_id]["category"])
-        self.assertEqual(writer.members.await_args_list, [call("123"), call("123"), call("123")])
+        writer.move_request.assert_awaited_once_with([item_id], target="123", name=plan["assignments"][item_id]["category"])
+        self.assertEqual(writer.members.await_args_list, [call("123")] * 4)
 
     async def test_execute_checks_target_membership_after_clearing_old_membership(self):
         snapshot, plan = demo_data()
@@ -380,7 +382,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.owner.data.update(snapshot=snapshot, plan=plan)
         writer = AsyncMock()
         writer.ensure_folder.return_value = "123"
-        writer.members.side_effect = [set(), {item_id}, {item_id}, set(), set()]
+        writer.members.side_effect = [set(), {item_id}, {item_id}, {item_id}, set(), set()]
         self.owner.writer_factory = lambda: writer
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(CollectionError) as caught:
@@ -389,7 +391,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(plan["operations"][item_id]["status"], "inflight")
         self.assertEqual(plan["phase"], "partial")
         self.assertEqual(writer.members.await_args_list, [
-            call("123"), call("123"), call("demo-old"), call("demo-old"), call("123"),
+            call("123"), call("123"), call("123"), call("demo-old"), call("demo-old"), call("123"),
         ])
 
     async def test_execute_resume_skips_a_write_that_succeeded_without_a_response(self):
@@ -411,6 +413,52 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(plan["operations"][item_id]["status"], "completed")
         self.assertEqual(plan["phase"], "completed")
         self.assertEqual(writer.move_request.await_count, 1)
+
+    async def test_execute_expands_verified_probe_to_bounded_batches(self):
+        snapshot, plan = demo_data()
+        ids = [str(90071992547409930 + index) for index in range(14)]
+        category = plan["categories"][0]
+        snapshot.update(demo=False, account_marker=self.owner.account_marker(self.owner.cookies()),
+                        items=[{"aweme_id": item_id, "original_folders": []} for item_id in ids])
+        plan["assignments"] = {item_id: {"category": category} for item_id in ids}
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        writer = AsyncMock()
+        writer.ensure_folder.return_value = "123"
+        writer.members.side_effect = [set(), set(ids[:3]), set(ids)]
+        self.owner.writer_factory = lambda: writer
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()) as sleep:
+            await self.owner.execute(plan["id"], plan["revision"])
+        self.assertEqual(writer.move_request.await_args_list, [
+            call(ids[:3], target="123", name=category),
+            call(ids[3:13], target="123", name=category),
+            call(ids[13:], target="123", name=category),
+        ])
+        self.assertEqual(writer.members.await_count, 3)
+        self.assertEqual(sleep.await_args_list, [call(5)] * 3)
+        self.assertEqual(plan["phase"], "completed")
+
+    async def test_execute_partial_probe_stops_and_resumes_only_missing_ids(self):
+        snapshot, plan = demo_data()
+        ids = ["11", "22", "33", "44"]
+        category = plan["categories"][0]
+        snapshot.update(demo=False, account_marker=self.owner.account_marker(self.owner.cookies()),
+                        items=[{"aweme_id": item_id, "original_folders": []} for item_id in ids])
+        plan["assignments"] = {item_id: {"category": category} for item_id in ids}
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        writer = AsyncMock()
+        writer.ensure_folder.return_value = "123"
+        writer.members.side_effect = [set(), {"11", "22"}, {"11", "22"}, set(ids), set(ids)]
+        self.owner.writer_factory = lambda: writer
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.execute(plan["id"], plan["revision"])
+            self.assertEqual(caught.exception.code, "verification_failed")
+            self.assertEqual(plan["phase"], "partial")
+            self.assertEqual(set(plan["operations"]), set(ids[:3]))
+            writer.move_request.assert_awaited_once_with(ids[:3], target="123", name=category)
+            await self.owner.execute(plan["id"], plan["revision"])
+        self.assertEqual(writer.move_request.await_args_list[-1], call(ids[2:], target="123", name=category))
+        self.assertEqual(plan["phase"], "completed")
 
     async def test_demo_and_account_change_never_open_writer(self):
         self.owner.use_demo()
@@ -476,4 +524,5 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             await self.owner.execute(plan["id"], plan["revision"])
         self.assertEqual(plan["phase"], "partial")
         self.assertEqual(next(iter(plan["operations"].values()))["status"], "inflight")
+        writer.move_request.assert_awaited_once()
         writer.close.assert_not_awaited()

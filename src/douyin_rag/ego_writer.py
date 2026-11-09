@@ -130,25 +130,31 @@ async function run() {
             if (cookie.UIFID || cookie.UIFID_TEMP) headers.uifid = cookie.UIFID || cookie.UIFID_TEMP;
             if (cookie.passport_csrf_token) headers["x-secsdk-csrf-token"] = cookie.passport_csrf_token;
         }
+        const {item_ids, ...queryParams} = params;
+        const query = new URLSearchParams(queryParams);
+        for (const itemId of item_ids ?? []) query.append("item_ids", itemId);
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 12000);
         try {
-            const response = await fetch(path + "?" + new URLSearchParams(params), {
+            const response = await fetch(path + "?" + query, {
                 method: "POST", credentials: "include", cache: "no-store",
                 redirect: "error", signal: controller.signal, headers
             });
-            if ([401, 403, 429].includes(response.status)) return {error: "browser_attention"};
+            if ([401, 403, 429].includes(response.status)) {
+                return {error: "browser_attention", httpStatus: response.status};
+            }
             if (!response.ok) return {error: "write_unconfirmed"};
             const value = await response.json();
-            if (typeof value?.status_code !== "number") return {error: "write_unconfirmed"};
-            return value.status_code === 0 ? {} : {error: "write_rejected"};
+            if (!Number.isSafeInteger(value?.status_code)) return {error: "write_unconfirmed"};
+            return value.status_code === 0 ? {} : {error: "write_rejected", platformStatus: value.status_code};
         } catch {
             return {error: "write_unconfirmed"};
         } finally {
             clearTimeout(timer);
         }
     }, {operation: input.operation, path, params: input.params});
-    return reply.error === "browser_attention" ? await handOff(reply.error) : reply;
+    if (reply.error === "browser_attention") await handOff(reply.error);
+    return reply;
 }
 let result;
 try {
@@ -219,7 +225,12 @@ class EgoWriter:
                 "write_unconfirmed": "抖音写入结果未确认，继续整理时会先查询抖音。",
                 "browser_unavailable": "无法使用 Ego Lite 整理页面，请检查浏览器状态后继续。",
             }
-            raise CollectionError(messages.get(error, messages["browser_unavailable"]), error)
+            message = messages.get(error, messages["browser_unavailable"])
+            if error == "write_rejected" and type(result.get("platformStatus")) is int:
+                message += f"（抖音状态码 {result['platformStatus']}）"
+            if error == "browser_attention" and type(result.get("httpStatus")) is int:
+                message += f"（HTTP {result['httpStatus']}）"
+            raise CollectionError(message, error)
         return result
 
     async def open(self, cookies):
@@ -293,11 +304,11 @@ class EgoWriter:
                 return found
         raise CollectionError("未在抖音中读到新收藏夹，未确认创建成功；重试会先查询，避免重复建夹。", "verification_failed")
 
-    async def move_request(self, item_id, target=None, name="", source=None):
-        # 参数来源：cv-cat/DouYin_Spider 的 move_collect_aweme/remove_collect_aweme。
+    async def move_request(self, item_ids, target=None, name="", source=None):
+        # 抖音网页版的批量管理通过重复的 item_ids 查询参数传递作品 ID。
         params = {
             "aid": "6383", "device_platform": "webapp", "channel": "channel_pc_web",
-            "item_ids": item_id, "item_type": "2", "collects_name": name,
+            "item_ids": item_ids, "item_type": "2", "collects_name": name,
             "version_code": "170400", "version_name": "17.4.0",
             "update_version_code": "170400", "platform": "PC", "cookie_enabled": "true",
         }
