@@ -1,3 +1,4 @@
+import hashlib
 import json
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import Mock
@@ -45,6 +46,31 @@ class CollectionsTest(IsolatedAsyncioTestCase):
                 await self.client.get_collection_folders(**kwargs)
         with self.assertRaises(ValueError):
             await self.client.get_collection_videos(" ")
+
+    async def test_current_account_marker_requires_authenticated_self_profile(self):
+        sec_uid = "MS4wLjABSyntheticAccount"
+        for payload, authenticated in (
+            ({"status_code": 0, "user": {"sec_uid": sec_uid}}, True),
+            ({"status_code": 8, "user": {"sec_uid": sec_uid}}, False),
+            ({"status_code": False, "user": {"sec_uid": sec_uid}}, False),
+            ({"status_code": 0, "user": {"sec_uid": ""}}, False),
+            ({"status_code": 0, "user": None}, False),
+        ):
+            with self.subTest(payload=payload):
+                def reply(request):
+                    self.assertEqual(request.method, "GET")
+                    self.assertEqual(request.url.path, "/aweme/v1/web/user/profile/self/")
+                    self.assertEqual(request.headers["uifid"], "identity")
+                    self.assertIn("x-secsdk-web-signature", request.url.params)
+                    return httpx.Response(200, json=payload)
+                async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+                    self.client._http_client = client
+                    if authenticated:
+                        self.assertEqual(await self.client.own_account_marker(), hashlib.sha256(sec_uid.encode()).hexdigest())
+                    else:
+                        with self.assertRaises(CollectionError) as caught:
+                            await self.client.own_account_marker()
+                        self.assertEqual(caught.exception.code, "account_unconfirmed")
 
     async def test_upstream_rejection_is_not_empty_success_or_raw_body(self):
         for status, payload in ((200, {"status_code": 1}), (200, {"status_code": 5}), (200, {"status_code": 0}), (200, []), (403, "ArgusSecurityPlugin Signature Not Found private-payload")):

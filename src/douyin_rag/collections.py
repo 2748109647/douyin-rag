@@ -1,6 +1,8 @@
 """从 douyin-mcp 按调用链提取的收藏读取客户端；无搜索和互动写入。"""
+import hashlib
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 from dataclasses import dataclass
@@ -15,6 +17,9 @@ class CollectionError(Exception):
         super().__init__(message)
 
 DataFetchError = CollectionError
+
+SELF_PROFILE_PATH = "/aweme/v1/web/user/profile/self/"
+SEC_UID_PATTERN = r"MS4wLjAB[A-Za-z0-9_-]+"
 
 COOKIE_ATTRIBUTE_KEYS = {
     "path",
@@ -295,6 +300,19 @@ class CollectionClient:
             return response.json()
         except json.JSONDecodeError as e:
             raise DataFetchError(f"Failed to parse response: {e}")
+
+    async def own_account_marker(self) -> str:
+        """Return a digest of the account identified by the current login."""
+        try:
+            result = await self._request("GET", SELF_PROFILE_PATH, {})
+        except (CollectionError, httpx.HTTPError):
+            result = None
+        if isinstance(result, dict) and type(result.get("status_code")) is int and result["status_code"] == 0:
+            user = result.get("user")
+            sec_uid = user.get("sec_uid") if isinstance(user, dict) else None
+            if isinstance(sec_uid, str) and re.fullmatch(SEC_UID_PATTERN, sec_uid):
+                return hashlib.sha256(sec_uid.encode()).hexdigest()
+        raise CollectionError("暂时无法确认本机扫描会话的抖音账号。请检查连接和登录状态后继续整理。", "account_unconfirmed")
 
     async def _collection_request(
         self, uri: str, cursor: int, count: int,

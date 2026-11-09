@@ -8,7 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .collections import CollectionClient, CollectionError
+from .collections import CollectionClient, CollectionError, SEC_UID_PATTERN, SELF_PROFILE_PATH
 
 
 # CLI 每轮从 stdin 接收脚本，任务空间和页面在调用之间保留。
@@ -18,7 +18,16 @@ const { createHash } = await import("node:crypto");
 let spaceId = input.spaceId;
 let handedOff = input.takeOver;
 async function run() {
-    const task = input.takeOver
+    if (input.operation === "open" && spaceId === null) {
+        const delegated = (await listTaskSpaces()).filter(space =>
+            space.name === input.spaceName && space.ownership === "agentDelegatedToUser");
+        if (delegated.length > 1) return {error: "browser_unavailable"};
+        if (delegated.length === 1) {
+            spaceId = delegated[0].id;
+            handedOff = true;
+        }
+    }
+    const task = handedOff
         ? await takeOverTaskSpace(spaceId)
         : await taskSpace(spaceId ?? input.spaceName);
     spaceId = task.spaceId;
@@ -29,6 +38,10 @@ async function run() {
     }
     const page = task.page("p1");
     const origin = "https://www.douyin.com";
+    const writePaths = {
+        create: "/aweme/v1/web/collects/maintain/",
+        move: "/aweme/v1/web/collects/video/move/"
+    };
     if (input.operation === "open" && !(await page.url()).startsWith(origin + "/")) {
         await page.goto(origin + "/user/self?showTab=favorite_collection", {
             waitUntil: "domcontentloaded", timeout: 20000
@@ -42,22 +55,60 @@ async function run() {
     if (!(await page.url()).startsWith(origin + "/")) {
         return await handOff("browser_attention");
     }
-    const { cookies } = await page.cdp("Network.getCookies", {urls: [origin + "/"]});
-    const values = Object.fromEntries(cookies.map(({name, value}) => [name, value]));
-    if (!(values.sessionid || values.sessionid_ss)) {
-        return await handOff("login_required");
+    async function sessionMarker(path) {
+        const {cookies} = await page.cdp("Network.getCookies", {urls: [origin + path]});
+        if (!cookies.some(({name, value}) => /^(sessionid|sessionid_ss)$/.test(name) && value)) {
+            return "";
+        }
+        const session = cookies.filter(({name}) =>
+            /^(uid_tt|uid_tt_ss|sessionid|sessionid_ss|sid_tt|sid_guard)$/.test(name));
+        const entries = session.map(({name, value, domain, path}) =>
+            JSON.stringify([name, value, domain, path])).sort();
+        return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
     }
-    const marker = createHash("sha256")
-        .update(values.uid_tt || values.sessionid || values.sessionid_ss).digest("hex");
-    if (marker !== input.marker) {
-        return await handOff("account_changed");
+    if (input.operation === "open") {
+        const marker = await sessionMarker(input.profilePath);
+        if (!marker) return await handOff("login_required");
+        const secUid = await page.evaluate(async ({path, pattern}) => {
+            if (location.origin !== "https://www.douyin.com") return "";
+            const params = new URLSearchParams({
+                aid: "6383", device_platform: "webapp", channel: "channel_pc_web"
+            });
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 10000);
+            try {
+                const response = await fetch(path + "?" + params, {
+                    credentials: "include", cache: "no-store", redirect: "error",
+                    signal: controller.signal
+                });
+                if (!response.ok) return "";
+                const result = await response.json();
+                const id = result?.user?.sec_uid;
+                return result?.status_code === 0 && typeof id === "string"
+                    && new RegExp("^(?:" + pattern + ")$").test(id) ? id : "";
+            } catch {
+                return "";
+            } finally {
+                clearTimeout(timer);
+            }
+        }, {path: input.profilePath, pattern: input.accountPattern});
+        if (!secUid) return await handOff("account_unconfirmed");
+        if (await sessionMarker(input.profilePath) !== marker) {
+            return await handOff("browser_session_changed");
+        }
+        if (createHash("sha256").update(secUid).digest("hex") !== input.accountMarker) {
+            return await handOff("account_changed");
+        }
+        return {sessionMarker: marker};
     }
-    if (input.operation === "open") return {};
 
-    const reply = await page.evaluate(async ({operation, params}) => {
+    const path = writePaths[input.operation];
+    const marker = await sessionMarker(path);
+    if (!marker) return await handOff("login_required");
+    if (marker !== input.sessionMarker) return await handOff("browser_session_changed");
+    const reply = await page.evaluate(async ({operation, path, params}) => {
         if (location.origin !== "https://www.douyin.com") return {error: "browser_attention"};
         const create = operation === "create";
-        const path = create ? "/aweme/v1/web/collects/maintain/" : "/aweme/v1/web/collects/video/move/";
         const headers = {accept: "application/json, text/plain, */*"};
         if (!create) {
             const cookie = Object.fromEntries(
@@ -96,7 +147,7 @@ async function run() {
         } finally {
             clearTimeout(timer);
         }
-    }, {operation: input.operation, params: input.params});
+    }, {operation: input.operation, path, params: input.params});
     return reply.error === "browser_attention" ? await handOff(reply.error) : reply;
 }
 let result;
@@ -119,14 +170,16 @@ class EgoWriter:
         self.interval = interval
         self.client_factory = client_factory
         self.read_cookies = ""
-        self.marker = ""
+        self.session_marker = ""
 
-    async def _command(self, operation, params=None):
+    async def _command(self, operation, params=None, *, account_marker=None):
         payload = {
             "operation": operation, "params": params, "spaceId": self.space_id,
-            "spaceName": self.space_name, "marker": self.marker,
+            "spaceName": self.space_name, "sessionMarker": self.session_marker,
             "takeOver": operation == "open" and self.handed_off,
         }
+        if operation == "open":
+            payload.update(accountMarker=account_marker, profilePath=SELF_PROFILE_PATH, accountPattern=SEC_UID_PATTERN)
         source = ("const input = " + json.dumps(payload) + ";\n" + EGO_SCRIPT).encode("utf-8")
         environment = {key: value for key, value in os.environ.items() if not key.upper().startswith("DOUYIN_")}
         try:
@@ -158,22 +211,30 @@ class EgoWriter:
         if error:
             messages = {
                 "login_required": "请在 Ego Lite 的拾藏整理页面登录抖音，然后点击继续整理。",
-                "account_changed": "Ego Lite 登录会话与扫描时不一致。请切换到扫描所用账号后继续整理。",
+                "account_changed": "Ego Lite 登录的是另一个抖音账号。请切换到扫描所用账号后继续整理。",
+                "account_unconfirmed": "暂时无法确认 Ego Lite 中的抖音账号。请检查登录或验证状态后继续整理。",
+                "browser_session_changed": "Ego Lite 登录会话刚刚变化。继续整理时会重新核对账号。",
                 "browser_attention": "抖音网页需要处理。请在 Ego Lite 中检查登录或验证码，再点击继续整理。",
                 "write_rejected": "抖音拒绝了整理请求。请检查 Ego Lite 中的抖音页面后继续。",
                 "write_unconfirmed": "抖音写入结果未确认，继续整理时会先查询抖音。",
                 "browser_unavailable": "无法使用 Ego Lite 整理页面，请检查浏览器状态后继续。",
             }
             raise CollectionError(messages.get(error, messages["browser_unavailable"]), error)
+        return result
 
-    async def open(self, cookies, marker):
-        self.read_cookies = ""
-        self.marker = marker
-        await self._command("open")
+    async def open(self, cookies):
+        self.read_cookies = self.session_marker = ""
+        async with self.client_factory(cookies) as client:
+            account_marker = await client.own_account_marker()
+        result = await self._command("open", account_marker=account_marker)
+        marker = result.get("sessionMarker")
+        if not isinstance(marker, str) or len(marker) != 64 or any(char not in "0123456789abcdef" for char in marker):
+            raise CollectionError("Ego Lite 未返回可核对的登录会话。请继续整理以重试。", "account_unconfirmed")
+        self.session_marker = marker
         self.read_cookies = cookies
 
     async def close(self):
-        self.read_cookies = self.marker = ""
+        self.read_cookies = self.session_marker = ""
         if self.space_id is None or self.handed_off:
             return
         try:

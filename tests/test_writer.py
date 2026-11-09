@@ -162,7 +162,7 @@ class WriterTest(IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             writer = EgoWriter(directory)
             writer.read_cookies = "sessionid=synthetic-private"
-            writer.marker = "synthetic-marker"
+            writer.session_marker = "synthetic-marker"
             with patch.dict(os.environ, {"DOUYIN_COOKIE": "sessionid=synthetic-private"}), \
                     patch("douyin_rag.ego_writer.subprocess.run") as run:
                 run.return_value.stdout = b''
@@ -172,7 +172,7 @@ class WriterTest(IsolatedAsyncioTestCase):
                 source = run.call_args.kwargs["input"].decode("utf-8")
                 payload = json.loads(source.splitlines()[0].removeprefix("const input = ").removesuffix(";"))
                 self.assertEqual(payload["operation"], "move")
-                self.assertEqual(payload["marker"], "synthetic-marker")
+                self.assertEqual(payload["sessionMarker"], "synthetic-marker")
                 self.assertEqual(payload["params"]["item_ids"], "9")
                 self.assertEqual(payload["params"]["to_collects_id"], "123")
                 self.assertIn("/aweme/v1/web/collects/video/move/", source)
@@ -185,10 +185,13 @@ class WriterTest(IsolatedAsyncioTestCase):
 
     async def test_missing_cli_and_write_timeout_have_distinct_results(self):
         with TemporaryDirectory() as directory:
-            writer = EgoWriter(directory)
+            client = AsyncMock()
+            client.__aenter__.return_value = client
+            client.own_account_marker.return_value = "a" * 64
+            writer = EgoWriter(directory, client_factory=Mock(return_value=client))
             with patch("douyin_rag.ego_writer.subprocess.run", side_effect=FileNotFoundError):
                 with self.assertRaises(CollectionError) as caught:
-                    await writer.open("sessionid=synthetic", "marker")
+                    await writer.open("sessionid=synthetic")
                 self.assertEqual(caught.exception.code, "browser_unavailable")
             with patch("douyin_rag.ego_writer.subprocess.run", side_effect=subprocess.TimeoutExpired("ego-browser", 35)):
                 with self.assertRaises(CollectionError) as caught:
@@ -197,19 +200,41 @@ class WriterTest(IsolatedAsyncioTestCase):
 
     async def test_continue_takes_back_the_same_handed_off_space(self):
         with TemporaryDirectory() as directory:
-            writer = EgoWriter(directory)
+            client = AsyncMock()
+            client.__aenter__.return_value = client
+            client.own_account_marker.return_value = "a" * 64
+            writer = EgoWriter(directory, client_factory=Mock(return_value=client))
             with patch("douyin_rag.ego_writer.subprocess.run") as run:
                 run.return_value.stdout = b'SHICANG_EGO {"spaceId": 12, "handedOff": true, "error": "login_required"}'
                 run.return_value.stderr = b''
                 with self.assertRaises(CollectionError) as caught:
-                    await writer.open("sessionid=synthetic", "marker")
+                    await writer.open("sessionid=synthetic")
                 self.assertEqual(caught.exception.code, "login_required")
                 await writer.close()
                 self.assertEqual(run.call_count, 1)
-                run.return_value.stdout = b'SHICANG_EGO {"spaceId": 12, "handedOff": false}'
-                await writer.open("sessionid=synthetic", "marker")
+                result = {"spaceId": 12, "handedOff": False, "sessionMarker": "b" * 64}
+                run.return_value.stdout = b'SHICANG_EGO ' + json.dumps(result).encode()
+                await writer.open("sessionid=synthetic")
                 source = run.call_args.kwargs["input"].decode("utf-8")
                 self.assertIn('"spaceId": 12', source)
                 self.assertIn('"takeOver": true', source)
+                self.assertIn('"accountMarker": "' + "a" * 64 + '"', source)
+                self.assertNotIn("sessionid=synthetic", source)
+                self.assertEqual(writer.session_marker, "b" * 64)
                 await writer.close()
                 self.assertIsNone(writer.space_id)
+
+    async def test_unconfirmed_ego_identity_clears_previous_write_binding(self):
+        with TemporaryDirectory() as directory:
+            client = AsyncMock()
+            client.__aenter__.return_value = client
+            client.own_account_marker.return_value = "a" * 64
+            writer = EgoWriter(directory, client_factory=Mock(return_value=client))
+            writer.read_cookies = "sessionid=old-synthetic"
+            writer.session_marker = "b" * 64
+            writer._command = AsyncMock(return_value={})
+            with self.assertRaises(CollectionError) as caught:
+                await writer.open("sessionid=new-synthetic")
+            self.assertEqual(caught.exception.code, "account_unconfirmed")
+            self.assertEqual(writer.session_marker, "")
+            self.assertEqual(writer.read_cookies, "")
