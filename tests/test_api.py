@@ -1,10 +1,11 @@
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 from douyin_rag.app import create_app
+from douyin_rag.ego_writer import EgoWriter
 from douyin_rag.organizer import Organizer
 
 
@@ -96,8 +97,9 @@ class ApiTest(TestCase):
             {"status": "waiting", "message": "等待扫码", "qr_image": "data:image/png;base64,c3ludGhldGlj"},
             {"status": "authenticated", "message": "登录成功"},
         ]
-        self.owner.writer_factory = lambda: browser
-        result = self.client.post("/api/browser/open", headers=self.headers)
+        with patch("douyin_rag.app.BrowserWriter", return_value=browser):
+            result = self.client.post("/api/browser/open", headers=self.headers)
+        self.assertIsInstance(self.owner.writer_factory(), EgoWriter)
         self.assertEqual(result.json()["status"], "waiting")
         self.assertEqual(result.headers["cache-control"], "no-store")
         browser.open.assert_awaited_once_with(headless=True)
@@ -112,10 +114,10 @@ class ApiTest(TestCase):
     def test_qr_refresh_cancel_and_guards_without_verification_window(self):
         browser = AsyncMock()
         browser.login_state.return_value = {"status": "expired", "message": "过期"}
-        self.owner.writer_factory = lambda: browser
         for route in ("open", "status", "refresh", "cancel", "finish"):
             self.assertEqual(self.client.post("/api/browser/" + route).status_code, 403)
-        self.client.post("/api/browser/open", headers=self.headers)
+        with patch("douyin_rag.app.BrowserWriter", return_value=browser):
+            self.client.post("/api/browser/open", headers=self.headers)
         result = self.client.post("/api/browser/finish", headers=self.headers)
         self.assertEqual(result.status_code, 400)
         browser.save_login.assert_not_awaited()

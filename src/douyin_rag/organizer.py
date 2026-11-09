@@ -473,9 +473,7 @@ class Organizer:
         plan["phase"] = "applying"
         self.persist()
         try:
-            await writer.open(cookies)
-            if self.account_marker(await writer.cookies()) != snapshot.get("account_marker"):
-                raise CollectionError("浏览器账号与扫描账号不一致，请重新连接并扫描。", "account_changed")
+            await writer.open(cookies, snapshot["account_marker"])
             used = set(a["category"] for a in plan["assignments"].values())
             for category in plan["categories"]:
                 if category not in used:
@@ -520,7 +518,9 @@ class Organizer:
             plan["phase"] = "completed"
             self.progress("全部可读作品已整理，目标收藏夹成员核对通过。", len(expected), len(expected))
         except CollectionError as exc:
-            keep_browser_open = exc.code in {"browser_attention", "write_rejected", "login_required"}
+            keep_browser_open = exc.code in {
+                "account_changed", "browser_attention", "login_required", "write_rejected", "write_unconfirmed",
+            }
             raise
         finally:
             if plan["phase"] == "applying":

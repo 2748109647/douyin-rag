@@ -46,6 +46,11 @@ SOFTWARE.
 移动与夹内移出参数参考 cv-cat/DouYin_Spider 的 move_collect_aweme、remove_collect_aweme，仅按协议构造请求，未复制其完整项目或签名/登录框架。
 来源：https://github.com/cv-cat/DouYin_Spider/blob/master/dy_apis/douyin_api.py
 
+# 收藏夹创建协议参考
+
+创建参数参考 MIT 许可的 douyin-favorite-MyLike，基线为 `1cf96809f7561a0fe2a59e2291692623d27f891e`。本项目按协议构造建夹请求，使用 Ego Lite 执行。
+来源：https://github.com/Hannah2227/douyin-favorite-MyLike/blob/1cf96809f7561a0fe2a59e2291692623d27f891e/apps/desktop/src/main/favorite-actions.ts#L216-L250
+
 # 字体与示例素材
 
 - DM Sans 来自 Google Fonts，SIL Open Font License 1.1，许可保存在 web/assets/DM-Sans-OFL.txt。

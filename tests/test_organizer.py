@@ -316,8 +316,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.owner.data.update(snapshot=snapshot, plan=plan)
         moves, memberships = [], {}
         class Writer:
-            async def open(inner, cookies): pass
-            async def cookies(inner): return "sessionid=synthetic"
+            async def open(inner, cookies, marker): pass
             async def close(inner): pass
             async def ensure_folder(inner, name): return str(plan["categories"].index(name)+1)
             async def move_and_verify(inner, item, target, category):
@@ -347,6 +346,24 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             await self.owner.execute(plan["id"], plan["revision"])
         MockWriter.assert_not_called()
 
+    async def test_ego_session_mismatch_stops_before_writing(self):
+        snapshot, plan = demo_data()
+        cookies = self.owner.cookies()
+        snapshot.update(demo=False, account_marker=self.owner.account_marker(cookies))
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        writer = AsyncMock()
+        writer.open.side_effect = CollectionError("合成账号不匹配", "account_changed")
+        self.owner.writer_factory = lambda: writer
+        with self.assertRaises(CollectionError) as caught:
+            await self.owner.execute(plan["id"], plan["revision"])
+        self.assertEqual(caught.exception.code, "account_changed")
+        writer.open.assert_awaited_once_with(cookies, snapshot["account_marker"])
+        writer.ensure_folder.assert_not_awaited()
+        writer.move_and_verify.assert_not_awaited()
+        writer.close.assert_not_awaited()
+        self.assertEqual(plan["phase"], "partial")
+        self.assertEqual(plan["operations"], {})
+
     async def test_restart_marks_running_job_interrupted_and_never_returns_key(self):
         self.owner.write("job", {"kind": "classify", "status": "running"})
         restored = Organizer(self.temp.name)
@@ -370,7 +387,6 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         snapshot.update(demo=False, account_marker=self.owner.account_marker(self.owner.cookies()))
         self.owner.data.update(snapshot=snapshot, plan=plan)
         writer = AsyncMock()
-        writer.cookies.return_value = self.owner.cookies()
         writer.ensure_folder.return_value = "123"
         writer.move_and_verify.side_effect = CollectionError("合成平台验证提示", "write_rejected")
         self.owner.writer_factory = lambda: writer

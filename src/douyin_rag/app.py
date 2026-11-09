@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .collections import CollectionError
+from .ego_writer import EgoWriter
 from .organizer import Organizer
 from .writer import BrowserWriter
 
@@ -53,10 +54,11 @@ def create_app(organizer=None):
     login_lock = asyncio.Lock()
     login_result = {"status": "idle", "message": "点击扫码登录，在当前页面连接抖音。"}
     shared_writer = None
+
     def writer_factory():
         nonlocal shared_writer
         if shared_writer is None:
-            shared_writer = BrowserWriter(owner.root, owner.config()["interval"], owner.client_factory)
+            shared_writer = EgoWriter(owner.root, owner.config()["interval"], owner.client_factory)
         shared_writer.interval = owner.config()["interval"]
         return shared_writer
     if owner.writer_factory is None:
@@ -196,7 +198,7 @@ def create_app(organizer=None):
             owner.require_idle()
             if login_browser:
                 await login_browser.close()
-            login_browser = owner.writer_factory()
+            login_browser = BrowserWriter(owner.root)
             try:
                 await login_browser.open(headless=True)
                 await login_browser.prepare_login()
