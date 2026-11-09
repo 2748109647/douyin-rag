@@ -137,26 +137,31 @@ class WriterTest(IsolatedAsyncioTestCase):
             self.assertEqual(await writer.ensure_folder("合成夹"), "1")
             self.assertEqual(writer._command.await_count, 1)
 
-    async def test_move_is_verified_before_removing_original_membership(self):
+    async def test_verification_pagination_follows_cursor_without_fixed_wait(self):
         with TemporaryDirectory() as directory:
             writer = EgoWriter(directory)
-            writer.members = AsyncMock(side_effect=[set(), {"9"}, {"9"}, set()])
-            writer.move_request = AsyncMock()
-            with patch("douyin_rag.ego_writer.asyncio.sleep", new=AsyncMock()):
-                await writer.move_and_verify({"aweme_id": "9", "original_folders": ["old"]}, "new", "新夹")
-            calls = writer.move_request.call_args_list
-            self.assertEqual(calls[0].kwargs, {"target": "new", "name": "新夹"})
-            self.assertEqual(calls[1].kwargs, {"source": "old"})
+            fetch = AsyncMock(side_effect=[
+                {"cursor": 9, "has_more": True, "aweme_list": [{"aweme_id": "1"}]},
+                {"cursor": 0, "has_more": False, "aweme_list": [{"aweme_id": "2"}]},
+            ])
+            with patch("douyin_rag.ego_writer.asyncio.sleep", new=AsyncMock()) as sleep:
+                result = await writer.all_pages(fetch, "aweme_list")
+            self.assertEqual([row["aweme_id"] for row in result], ["1", "2"])
+            self.assertEqual([entry.kwargs for entry in fetch.await_args_list], [
+                {"cursor": 0, "count": 50}, {"cursor": 9, "count": 50},
+            ])
+            sleep.assert_not_awaited()
 
-    async def test_unconfirmed_target_never_removes_old_membership(self):
+    async def test_verification_rejects_missing_and_repeated_cursors(self):
         with TemporaryDirectory() as directory:
             writer = EgoWriter(directory)
-            writer.members = AsyncMock(return_value=set())
-            writer.move_request = AsyncMock()
-            with patch("douyin_rag.ego_writer.asyncio.sleep", new=AsyncMock()):
-                with self.assertRaises(CollectionError):
-                    await writer.move_and_verify({"aweme_id": "9", "original_folders": ["old"]}, "new", "新夹")
-            writer.move_request.assert_awaited_once_with("9", target="new", name="新夹")
+            for page in ({"has_more": True}, {"cursor": 0, "has_more": True}):
+                with self.subTest(page=page):
+                    fetch = AsyncMock(return_value=page)
+                    with self.assertRaises(CollectionError) as caught:
+                        await writer.all_pages(fetch, "aweme_list")
+                    self.assertEqual(caught.exception.code, "verification_failed")
+                    fetch.assert_awaited_once()
 
     async def test_browser_request_uses_only_collection_move_and_reports_rejection(self):
         with TemporaryDirectory() as directory:

@@ -314,25 +314,103 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         snapshot, plan = demo_data()
         snapshot.update(demo=False, account_marker=self.owner.account_marker(self.owner.cookies()))
         self.owner.data.update(snapshot=snapshot, plan=plan)
-        moves, memberships = [], {}
+        events = []
+        old_items = {item["aweme_id"] for item in snapshot["items"] if item["original_folders"]}
+        memberships = {"demo-old": old_items.copy()}
         class Writer:
             async def open(inner, cookies): pass
             async def close(inner): pass
             async def ensure_folder(inner, name): return str(plan["categories"].index(name)+1)
-            async def move_and_verify(inner, item, target, category):
-                if item["aweme_id"] not in memberships.setdefault(target, set()):
-                    moves.append(item["aweme_id"])
-                    memberships[target].add(item["aweme_id"])
-            async def members(inner, folder): return memberships.get(folder, set())
+            async def move_request(inner, item_id, target=None, name="", source=None):
+                self.assertEqual(plan["operations"][item_id]["status"], "inflight")
+                events.append(("add" if target else "remove", target or source))
+                if target:
+                    memberships.setdefault(target, set()).add(item_id)
+                else:
+                    memberships[source].remove(item_id)
+            async def members(inner, folder):
+                events.append(("read", folder))
+                return memberships.get(folder, set()).copy()
         self.owner.writer_factory = Writer
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
             await self.owner.execute(plan["id"], plan["revision"])
         self.assertEqual(plan["phase"], "completed")
-        self.assertEqual(len(moves), len(snapshot["items"]))
+        self.assertTrue(all(operation["status"] == "completed" for operation in plan["operations"].values()))
+        self.assertEqual(sum(kind == "add" for kind, _ in events), len(snapshot["items"]))
+        self.assertEqual(sum(kind == "remove" for kind, _ in events), len(old_items))
+        final_add = max(index for index, event in enumerate(events) if event[0] == "add")
+        first_remove = next(index for index, event in enumerate(events) if event[0] == "remove")
+        targets = set(plan["folder_ids"].values())
+        cleared_targets = {plan["folder_ids"][plan["assignments"][item_id]["category"]] for item_id in old_items}
+        self.assertEqual({folder for kind, folder in events[final_add+1:first_remove] if kind == "read"}, targets | {"demo-old"})
+        for folder in targets | {"demo-old"}:
+            self.assertEqual(events.count(("read", folder)), 3 if folder in cleared_targets else 2)
         plan["phase"] = "partial"
+        events.clear()
         with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
             await self.owner.execute(plan["id"], plan["revision"])
-        self.assertEqual(len(moves), len(snapshot["items"]))
+        self.assertCountEqual(events, [("read", folder) for folder in targets])
+
+    async def test_execute_does_not_clear_old_membership_when_final_target_is_missing(self):
+        snapshot, plan = demo_data()
+        item = next(item for item in snapshot["items"] if item["original_folders"])
+        item_id = item["aweme_id"]
+        snapshot.update(demo=False, account_marker=self.owner.account_marker(self.owner.cookies()), items=[item])
+        plan["assignments"] = {item_id: plan["assignments"][item_id]}
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        writer = AsyncMock()
+        writer.ensure_folder.return_value = "123"
+        writer.members.return_value = set()
+        self.owner.writer_factory = lambda: writer
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.execute(plan["id"], plan["revision"])
+        self.assertEqual(caught.exception.code, "verification_failed")
+        self.assertEqual(plan["operations"][item_id]["status"], "unconfirmed")
+        self.assertEqual(plan["phase"], "partial")
+        writer.move_request.assert_awaited_once_with(item_id, target="123", name=plan["assignments"][item_id]["category"])
+        self.assertEqual(writer.members.await_args_list, [call("123"), call("123"), call("123")])
+
+    async def test_execute_checks_target_membership_after_clearing_old_membership(self):
+        snapshot, plan = demo_data()
+        item = next(item for item in snapshot["items"] if item["original_folders"])
+        item_id = item["aweme_id"]
+        snapshot.update(demo=False, account_marker=self.owner.account_marker(self.owner.cookies()), items=[item])
+        plan["assignments"] = {item_id: plan["assignments"][item_id]}
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        writer = AsyncMock()
+        writer.ensure_folder.return_value = "123"
+        writer.members.side_effect = [set(), {item_id}, {item_id}, set(), set()]
+        self.owner.writer_factory = lambda: writer
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.execute(plan["id"], plan["revision"])
+        self.assertEqual(caught.exception.code, "verification_failed")
+        self.assertEqual(plan["operations"][item_id]["status"], "inflight")
+        self.assertEqual(plan["phase"], "partial")
+        self.assertEqual(writer.members.await_args_list, [
+            call("123"), call("123"), call("demo-old"), call("demo-old"), call("123"),
+        ])
+
+    async def test_execute_resume_skips_a_write_that_succeeded_without_a_response(self):
+        snapshot, plan = demo_data()
+        item = next(item for item in snapshot["items"] if not item["original_folders"])
+        item_id = item["aweme_id"]
+        snapshot.update(demo=False, account_marker=self.owner.account_marker(self.owner.cookies()), items=[item])
+        plan["assignments"] = {item_id: plan["assignments"][item_id]}
+        self.owner.data.update(snapshot=snapshot, plan=plan)
+        writer = AsyncMock()
+        writer.ensure_folder.return_value = "123"
+        writer.members.side_effect = [set(), {item_id}, {item_id}]
+        writer.move_request.side_effect = CollectionError("合成响应丢失", "write_unconfirmed")
+        self.owner.writer_factory = lambda: writer
+        with self.assertRaises(CollectionError):
+            await self.owner.execute(plan["id"], plan["revision"])
+        self.assertEqual(plan["operations"][item_id]["status"], "inflight")
+        await self.owner.execute(plan["id"], plan["revision"])
+        self.assertEqual(plan["operations"][item_id]["status"], "completed")
+        self.assertEqual(plan["phase"], "completed")
+        self.assertEqual(writer.move_request.await_count, 1)
 
     async def test_demo_and_account_change_never_open_writer(self):
         self.owner.use_demo()
@@ -364,7 +442,7 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(writer.open.await_count, 3)
         writer.open.assert_awaited_with(cookies)
         writer.ensure_folder.assert_not_awaited()
-        writer.move_and_verify.assert_not_awaited()
+        writer.move_request.assert_not_awaited()
         writer.close.assert_not_awaited()
 
     async def test_restart_marks_running_job_interrupted_and_never_returns_key(self):
@@ -391,7 +469,8 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.owner.data.update(snapshot=snapshot, plan=plan)
         writer = AsyncMock()
         writer.ensure_folder.return_value = "123"
-        writer.move_and_verify.side_effect = CollectionError("合成平台验证提示", "write_rejected")
+        writer.members.return_value = set()
+        writer.move_request.side_effect = CollectionError("合成平台验证提示", "write_rejected")
         self.owner.writer_factory = lambda: writer
         with self.assertRaises(CollectionError):
             await self.owner.execute(plan["id"], plan["revision"])

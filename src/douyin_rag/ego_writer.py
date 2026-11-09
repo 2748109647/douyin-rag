@@ -258,7 +258,6 @@ class EgoWriter:
                 raise CollectionError("写后核对分页停滞，未确认成功。", "verification_failed")
             seen.add(cursor)
             cursor = following
-            await asyncio.sleep(self.interval)
 
     async def folders(self):
         async with self.client_factory(self.read_cookies) as client:
@@ -307,21 +306,3 @@ class EgoWriter:
         if source:
             params["from_collects_id"] = source
         await self._command("move", params)
-
-    async def move_and_verify(self, item, target, name):
-        item_id = item["aweme_id"]
-        if item_id not in await self.members(target):
-            await self.move_request(item_id, target=target, name=name)
-            for _ in range(3):
-                await asyncio.sleep(self.interval)
-                if item_id in await self.members(target):
-                    break
-            else:
-                raise CollectionError("移动后未读到目标作品，状态尚未确认。请稍后继续，系统会先核对归属。", "verification_failed")
-        # 目标已确认后再清理旧归属；仅调用夹内移出，不调用取消收藏或删除夹接口。
-        for old in item.get("original_folders", []):
-            if old != target and item_id in await self.members(old):
-                await self.move_request(item_id, source=old)
-                await asyncio.sleep(self.interval)
-                if item_id in await self.members(old):
-                    raise CollectionError("目标收藏夹已确认，但旧归属未移出。已暂停并保留记录。", "verification_failed")

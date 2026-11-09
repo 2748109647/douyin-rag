@@ -469,10 +469,14 @@ class Organizer:
         if self.writer_factory is None:
             raise CollectionError("整理执行器未连接。", "writer_unavailable")
         writer = self.writer_factory()
+        operations = plan["operations"]
+        interval = self.config()["interval"]
+        done = sum(operation["status"] == "completed" for operation in operations.values())
         keep_browser_open = False
         plan["phase"] = "applying"
         self.persist()
         try:
+            self.progress("正在核对抖音账号", done, len(expected))
             await writer.open(cookies)
             used = set(a["category"] for a in plan["assignments"].values())
             for category in plan["categories"]:
@@ -488,33 +492,30 @@ class Organizer:
                 plan["folder_ids"][category] = folder_id
                 self.persist()
                 self.progress(f"目标收藏夹已就绪：{category}")
+            initial_members = {}
+            prepared = done
             for item in snapshot["items"]:
                 self.check_pause()
                 item_id = item["aweme_id"]
                 category = plan["assignments"][item_id]["category"]
                 target = plan["folder_ids"][category]
-                operation = plan["operations"].get(item_id)
+                operation = operations.get(item_id)
                 if operation and operation["status"] == "completed":
                     continue
-                plan["operations"][item_id] = {"status": "inflight", "target": target, "category": category, "original_folders": item["original_folders"], "started_at": now()}
+                if target not in initial_members:
+                    # 每个目标夹只读一次，覆盖已归属作品和上轮可能成功的写入。
+                    initial_members[target] = await writer.members(target)
+                    self.check_pause()
+                operations[item_id] = {"status": "inflight", "target": target, "category": category, "original_folders": item["original_folders"], "started_at": now()}
                 self.persist()
-                # move_and_verify 先核对成员，再移动；重启不会盲目重复已完成的请求。
-                await writer.move_and_verify(item, target, category)
-                plan["operations"][item_id].update(status="completed", finished_at=now())
-                self.persist()
-                done = sum(o["status"] == "completed" for o in plan["operations"].values())
-                self.progress(f"已整理 {done} / {len(expected)} 个作品", done, len(expected))
-                await asyncio.sleep(self.config()["interval"])
-            # 完成标记来自最终全量成员核对，不仅依赖写接口返回成功。
-            self.progress("正在重新核对所有目标收藏夹", len(expected), len(expected))
-            for category, folder_id in plan["folder_ids"].items():
-                self.check_pause()
-                members = await writer.members(folder_id)
-                required = {key for key, value in plan["assignments"].items() if value["category"] == category}
-                if not required <= members:
-                    for item_id in required - members:
-                        plan["operations"][item_id]["status"] = "unconfirmed"
-                    raise CollectionError(f"收藏夹“{category}”的最终核对未通过，进度已保留，可继续整理。", "verification_failed")
+                needs_move = item_id not in initial_members[target]
+                if needs_move:
+                    await writer.move_request(item_id, target=target, name=category)
+                prepared += 1
+                self.progress(f"已处理 {prepared} / {len(expected)} 个作品的移入步骤，等待统一核对")
+                if needs_move:
+                    await asyncio.sleep(interval)
+            await self.verify_moves(writer, snapshot["items"], plan, interval)
             plan["phase"] = "completed"
             self.progress("全部可读作品已整理，目标收藏夹成员核对通过。", len(expected), len(expected))
         except CollectionError as exc:
@@ -529,6 +530,68 @@ class Organizer:
             self.persist()
             if not keep_browser_open:
                 await writer.close()
+
+    async def verify_moves(self, writer, items, plan, interval):
+        operations = plan["operations"]
+        by_category = {}
+        for item in items:
+            item_id = item["aweme_id"]
+            category = plan["assignments"][item_id]["category"]
+            by_category.setdefault(category, {})[item_id] = item["original_folders"]
+
+        self.progress("正在统一核对目标收藏夹")
+        missing_category = None
+        old_memberships = {}
+        for category, required in by_category.items():
+            self.check_pause()
+            folder_id = plan["folder_ids"][category]
+            missing = required.keys() - await writer.members(folder_id)
+            if missing:
+                # 抖音可能延迟更新，只有缺项的夹需要再读一轮。
+                await asyncio.sleep(interval)
+                self.check_pause()
+                missing = required.keys() - await writer.members(folder_id)
+            if missing:
+                missing_category = category
+            for item_id, original_folders in required.items():
+                operation = operations[item_id]
+                if item_id in missing:
+                    operation["status"] = "unconfirmed"
+                    operation.pop("finished_at", None)
+                elif operation["status"] != "completed":
+                    old_folders = set(original_folders) - {folder_id}
+                    for old in old_folders:
+                        old_memberships.setdefault(old, set()).add(item_id)
+                    if not old_folders:
+                        operation.update(status="completed", finished_at=now())
+            self.persist()
+            done = sum(operation["status"] == "completed" for operation in operations.values())
+            self.progress("正在统一核对目标收藏夹", done)
+        if missing_category is not None:
+            raise CollectionError(f"收藏夹“{missing_category}”的最终核对未通过，进度已保留，可继续整理。", "verification_failed")
+
+        if old_memberships:
+            self.progress("目标归属已核对，正在清理并核对原收藏夹")
+        removed = set()
+        for old, item_ids in old_memberships.items():
+            self.check_pause()
+            pending = item_ids & await writer.members(old)
+            for item_id in sorted(pending):
+                self.check_pause()
+                await writer.move_request(item_id, source=old)
+                removed.add(item_id)
+                await asyncio.sleep(interval)
+            self.check_pause()
+            if pending and item_ids & await writer.members(old):
+                raise CollectionError("目标收藏夹已确认，但旧归属未移出。已暂停并保留记录。", "verification_failed")
+        for category, required in by_category.items():
+            affected = required.keys() & removed
+            if affected:
+                self.check_pause()
+                if not affected <= await writer.members(plan["folder_ids"][category]):
+                    raise CollectionError(f"清理原归属后，收藏夹“{category}”的核对未通过，进度已保留。", "verification_failed")
+        for item_id in set().union(*old_memberships.values()):
+            operations[item_id].update(status="completed", finished_at=now())
 
 
 def demo_data():
