@@ -287,11 +287,31 @@ def create_app(organizer=None):
 
 def main():
     import argparse
+    import sys
     import uvicorn
     parser = argparse.ArgumentParser(description="在本机打开拾藏收藏整理网页")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--state-dir", type=Path, help="指定本机运行数据目录")
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--daily-run", action="store_true", help="独立执行每日增量汇总与收藏夹整理")
+    commands.add_argument("--daily-schedule", choices=("install", "status", "remove"), help="管理 Windows 每天六点的后台任务")
     options = parser.parse_args()
-    uvicorn.run(create_app(), host="127.0.0.1", port=options.port, access_log=False)
+    if options.daily_run:
+        from .daily import run_daily
+        result = asyncio.run(run_daily(options.state_dir))
+        if sys.stdout is not None:
+            print(json.dumps(result, ensure_ascii=False))
+        raise SystemExit(0 if result["status"] in {"baseline", "completed"} else 1)
+    if options.daily_schedule:
+        from .organizer import state_directory
+        from .scheduler import DailySchedule
+        try:
+            result = DailySchedule(options.state_dir or state_directory()).manage(options.daily_schedule)
+        except CollectionError as exc:
+            parser.exit(1, f"{exc}\n")
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    uvicorn.run(create_app(Organizer(options.state_dir)), host="127.0.0.1", port=options.port, access_log=False)
 
 
 if __name__ == "__main__":

@@ -141,7 +141,16 @@ class KnowledgeBase:
                     raise CollectionError("本地向量数据无效，未保存该作品。", "embedding_error")
                 db.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?,?)", (account, item["aweme_id"], n, chunk["start"], chunk["end"], chunk["text"], json.dumps(vector, allow_nan=False)))
 
-    async def index(self):
+    def document(self, item):
+        """仅返回当前账号、当前转写模型下的作品正文。"""
+        with self.database() as db:
+            row = db.execute("SELECT * FROM documents WHERE account=? AND item_id=?",
+                             (self.account(), item["aweme_id"])).fetchone()
+        if not row or row["fingerprint"] != self.fingerprint(item):
+            return {"status": "pending", "segments": [], "error": "尚未处理。"}
+        return {"status": row["status"], "segments": json.loads(row["segments"]), "error": row["error"]}
+
+    async def index(self, *, item_ids=None):
         snapshot = self.snapshot()
         if snapshot.get("demo"):
             raise CollectionError("示例模式使用明确标注的合成转写，不下载真实视频。", "demo_mode")
@@ -150,7 +159,9 @@ class KnowledgeBase:
             raise CollectionError("账号或会话已变化，请重新扫描后再处理内容。", "account_changed")
         account = self.account(snapshot)
         states = {row["aweme_id"]: row["status"] for row in self.status()["items"]}
-        pending = [item for item in snapshot["items"] if item.get("kind") == "video" and states[item["aweme_id"]] != "ready"]
+        selected = set(item_ids) if item_ids is not None else None
+        pending = [item for item in snapshot["items"] if item.get("kind") == "video" and states[item["aweme_id"]] != "ready"
+                   and (selected is None or item["aweme_id"] in selected)]
         self.owner.progress("准备本地模型，首次处理需要下载模型文件。", 0, len(pending))
         async with self.owner.client_factory(cookies) as client:
             for n, item in enumerate(pending):
