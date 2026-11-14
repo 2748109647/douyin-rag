@@ -70,6 +70,8 @@ class DailyTest(IsolatedAsyncioTestCase):
             if "日报助手" in messages[0]["content"]:
                 if self.summary_error:
                     raise CollectionError("合成模型不可用", "model_error")
+                if '"short_title"' in messages[0]["content"]:
+                    return {"short_title": "先分析再动手", "summary": "先分析问题，再采取行动。"}
                 return {"summary": "先分析，再动手。", "points": ["先进行分析。"]}
             payload = json.loads(messages[1]["content"])
             return {"items": [{"aweme_id": item["aweme_id"], "category": "知识工具", "reason": "合成依据", "confidence": .95}
@@ -114,6 +116,9 @@ class DailyTest(IsolatedAsyncioTestCase):
         report = self.report()
         self.assertEqual(set(report["items"]), {"2"})
         self.assertEqual(report["items"]["2"]["category"], "知识工具")
+        self.assertEqual(report["items"]["2"]["short_title"], "先分析再动手")
+        self.assertLessEqual(len(report["items"]["2"]["summary"]), 50)
+        self.assertNotIn("points", report["items"]["2"])
         self.assertEqual(self.members["10"], {"2"})
         self.assertEqual(self.members["9"], {"1", "3"})
         self.assertEqual(self.owner.read("workspace", {})["snapshot"]["id"], "manual-preserved")
@@ -306,6 +311,83 @@ class DailyTest(IsolatedAsyncioTestCase):
         self.assertNotIn("synthetic-private-url", json.dumps(saved))
         self.assertFalse((self.owner.root / "daily-state.json").exists())
 
+    async def test_brief_summary_retries_over_fifty_characters_instead_of_truncating(self):
+        worker = self.runner.worker("brief-retry")
+        self.owner.model_json.side_effect = [
+            {"short_title": "简明标题", "summary": "长" * 51},
+            {"short_title": "简明标题", "summary": "保留核心结论。"},
+        ]
+        value = await self.runner.summary(worker, "合成证据", compact=True)
+        self.assertEqual(value["summary"], "保留核心结论。")
+        self.assertEqual(self.owner.model_json.await_count, 2)
+
+    async def test_invalid_brief_never_marks_video_ready_and_does_not_block_moves(self):
+        await self.runner.run(self.moment())
+        self.add("2")
+        original = self.owner.model_json.side_effect
+
+        async def invalid(messages):
+            if '"short_title"' in messages[0]["content"]:
+                return {"short_title": "简明标题", "summary": "长" * 51}
+            return await original(messages)
+        self.owner.model_json.side_effect = invalid
+        await self.runner.run(self.moment(2))
+        report = self.report()
+        self.assertEqual(report["items"]["2"]["status"], "failed")
+        self.assertNotIn("summary", report["items"]["2"])
+        self.assertEqual(report["move_status"], "completed")
+
+    async def test_legacy_ready_summary_is_compacted_without_indexing_or_moving_again(self):
+        await self.runner.run(self.moment())
+        self.add("2")
+        await self.runner.run(self.moment(2))
+        state = self.records()
+        entry = state["runs"][0]
+        entry["status"] = "partial"
+        self.owner.write("daily-state", state)
+        worker = self.runner.worker(entry["id"])
+        report = worker.read("report", {})
+        row = report["items"]["2"]
+        row.pop("short_title")
+        row.update(summary="旧摘要" * 30, points=["旧的重点"])
+        worker.write("report", report)
+        self.owner.knowledge.transcriber.extract.reset_mock()
+        self.owner.model_json.reset_mock()
+        previous_moves = len(self.moves)
+        await self.runner.run(self.moment(2))
+        self.assertLessEqual(len(self.report()["items"]["2"]["summary"]), 50)
+        self.owner.knowledge.transcriber.extract.assert_not_awaited()
+        self.assertEqual(self.owner.model_json.await_count, 1)
+        self.assertEqual(len(self.moves), previous_moves)
+
+    async def test_brief_copy_keeps_original_files_and_only_displays_title_and_summary(self):
+        await self.runner.run(self.moment())
+        self.add("2")
+        await self.runner.run(self.moment(2))
+        worker = self.runner.worker(self.records()["runs"][0]["id"])
+        report = worker.read("report", {})
+        originals = {name: (worker.root/name).read_bytes() for name in ("report.json", "report.md", "workspace.json", "job.json")}
+        report["items"]["2"].update(short_title="精简标题", summary="一句话总结。", points=["不应显示的重点"])
+        DailyRunner.save_report(worker, report, brief_copy=True)
+        for name, original in originals.items():
+            self.assertEqual((worker.root/name).read_bytes(), original)
+        brief = (worker.root/"report-brief.md").read_text(encoding="utf-8")
+        self.assertIn("**[精简标题](https://www.douyin.com/video/2)**", brief)
+        self.assertIn("一句话总结。", brief)
+        self.assertNotIn("不应显示的重点", brief)
+        self.assertNotIn("打开原视频", brief)
+
+    async def test_failed_video_displays_a_short_honest_explanation_with_legacy_title(self):
+        worker = self.runner.worker("failed-legacy-report")
+        report = {"day": "2026-11-14", "move_status": "completed", "items": {
+            "2": {"title": "原始标题" * 30, "url": "https://www.douyin.com/video/2", "status": "failed",
+                  "error": "未识别到可用语音，首版暂不识别画面文字或无声演示。"}}}
+        DailyRunner.save_report(worker, report)
+        markdown = (worker.root/"report.md").read_text(encoding="utf-8")
+        self.assertIn("未识别到可用语音，无法生成总结。", markdown)
+        self.assertNotIn("原始标题" * 30, markdown)
+        self.assertNotIn("一句话总结", markdown)
+
 
 class LockAndValidationTest(TestCase):
     def test_lock_works_across_processes_and_releases_after_exit(self):
@@ -325,3 +407,14 @@ class LockAndValidationTest(TestCase):
                       {"summary": "x" * 1001, "points": ["ok"]}):
             with self.assertRaises(CollectionError):
                 DailyRunner.valid_summary(value)
+
+    def test_brief_title_and_summary_character_limits_include_punctuation(self):
+        valid = {"short_title": "题" * 20, "summary": "字" * 49 + "。"}
+        self.assertEqual(DailyRunner.valid_summary(valid, compact=True), valid)
+        for value in ({}, {"short_title": "题" * 21, "summary": "总结"},
+                      {"short_title": "题", "summary": "字" * 50 + "。"},
+                      {"short_title": "题", "summary": " "},
+                      {"short_title": "题\n目", "summary": "总结"},
+                      {"short_title": "题", "summary": ["总结"]}):
+            with self.assertRaises(CollectionError):
+                DailyRunner.valid_summary(value, compact=True)
