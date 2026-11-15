@@ -129,6 +129,31 @@ class RagTest(IsolatedAsyncioTestCase):
         with self.assertRaises(CollectionError):
             await self.kb.index()
 
+    async def test_failed_frame_download_does_not_replace_cached_speech_with_failure(self):
+        self.owner.cookies = lambda: "sessionid=synthetic"
+        self.owner.data["snapshot"]["account_marker"] = self.owner.account_marker(self.owner.cookies())
+        item = self.owner.data["snapshot"]["items"][2]
+        self.add(item, "已缓存的语音正文", [1., 0.])
+        class Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+        self.owner.client_factory = lambda cookies: Client()
+        self.owner.job = {"processed": 0, "total": None}
+        self.kb.transcriber = AsyncMock()
+        self.kb.transcriber.extract.side_effect = CollectionError("合成画面下载失败", "media_download_failed")
+        visual = {}
+        with patch("douyin_rag.rag.asyncio.sleep", new=AsyncMock()):
+            await self.kb.index(item_ids=[item["aweme_id"]], visual=visual)
+        self.assertEqual(self.kb.document(item)["status"], "ready")
+        self.assertEqual(self.kb.document(item)["segments"][0]["text"], "已缓存的语音正文")
+        self.assertFalse(self.kb.transcriber.extract.call_args.kwargs["transcribe_audio"])
+        self.assertEqual(visual[item["aweme_id"]]["frame_error"], "合成画面下载失败")
+        self.kb.transcriber.extract.side_effect = RuntimeError("合成本机解码器不可用")
+        with patch("douyin_rag.rag.asyncio.sleep", new=AsyncMock()):
+            await self.kb.index(item_ids=[item["aweme_id"]], visual=visual)
+        self.assertEqual(self.kb.document(item)["status"], "ready")
+        self.assertEqual(self.kb.document(item)["segments"][0]["text"], "已缓存的语音正文")
+
 
 class ChunksTest(TestCase):
     def test_chunking_preserves_content_and_time_boundaries(self):

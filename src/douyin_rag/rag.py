@@ -150,7 +150,7 @@ class KnowledgeBase:
             return {"status": "pending", "segments": [], "error": "尚未处理。"}
         return {"status": row["status"], "segments": json.loads(row["segments"]), "error": row["error"]}
 
-    async def index(self, *, item_ids=None):
+    async def index(self, *, item_ids=None, visual=None):
         snapshot = self.snapshot()
         if snapshot.get("demo"):
             raise CollectionError("示例模式使用明确标注的合成转写，不下载真实视频。", "demo_mode")
@@ -160,7 +160,7 @@ class KnowledgeBase:
         account = self.account(snapshot)
         states = {row["aweme_id"]: row["status"] for row in self.status()["items"]}
         selected = set(item_ids) if item_ids is not None else None
-        pending = [item for item in snapshot["items"] if item.get("kind") == "video" and states[item["aweme_id"]] != "ready"
+        pending = [item for item in snapshot["items"] if item.get("kind") == "video" and (states[item["aweme_id"]] != "ready" or visual is not None)
                    and (selected is None or item["aweme_id"] in selected)]
         self.owner.progress("准备本地模型，首次处理需要下载模型文件。", 0, len(pending))
         async with self.owner.client_factory(cookies) as client:
@@ -168,15 +168,33 @@ class KnowledgeBase:
                 self.owner.check_pause()
                 self.owner.progress(f"正在本地转写 {n+1}/{len(pending)}：{item.get('title', '')[:36]}", n, len(pending))
                 try:
-                    segments = await self.transcriber.extract(item, client, self.owner.config()["asr_model"])
+                    if visual is not None:
+                        evidence = await self.transcriber.extract(item, client, self.owner.config()["asr_model"],
+                                                                  include_frames=True, transcribe_audio=states[item["aweme_id"]] != "ready")
+                        visual[item["aweme_id"]] = evidence
+                        if states[item["aweme_id"]] == "ready":
+                            self.owner.progress("已有语音正文已保留，本轮仅采集画面。", n+1, len(pending))
+                            await asyncio.sleep(self.owner.config()["interval"])
+                            continue
+                        segments = evidence["segments"]
+                        if not segments:
+                            raise CollectionError(evidence["speech_error"] or "未识别到可用语音。", "no_speech")
+                    else:
+                        segments = await self.transcriber.extract(item, client, self.owner.config()["asr_model"])
                     chunks = chunks_from_segments(segments)
                     vectors = await asyncio.to_thread(self.embeddings.encode, [row["text"] for row in chunks])
                     self.save_document(account, item, "ready", segments, chunks, vectors)
                 except CollectionError as exc:
-                    self.save_document(account, item, "failed", error=str(exc))
+                    if visual is not None and states[item["aweme_id"]] == "ready":
+                        visual[item["aweme_id"]] = {"frames": [], "frame_error": str(exc), "segments": [], "speech_error": ""}
+                    else:
+                        self.save_document(account, item, "failed", error=str(exc))
                 except (ImportError, RuntimeError, OSError, ValueError) as exc:
-                    self.save_document(account, item, "failed", error="本地模型加载、转写或索引失败，请检查模型下载和依赖环境后重试。")
-                    raise CollectionError("本地模型处理失败，已保存进度。请检查模型下载和依赖环境后重试。", "local_model_error") from exc
+                    if visual is not None and states[item["aweme_id"]] == "ready":
+                        visual[item["aweme_id"]] = {"frames": [], "frame_error": "本机画面处理失败，已保留已有语音。", "segments": [], "speech_error": ""}
+                    else:
+                        self.save_document(account, item, "failed", error="本地模型加载、转写或索引失败，请检查模型下载和依赖环境后重试。")
+                        raise CollectionError("本地模型处理失败，已保存进度。请检查模型下载和依赖环境后重试。", "local_model_error") from exc
                 self.owner.progress("当前作品处理结束，进度已保存。", n+1, len(pending))
                 await asyncio.sleep(self.owner.config()["interval"])
         state = self.status()

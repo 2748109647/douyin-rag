@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock
 
 import httpx
 
@@ -47,6 +48,24 @@ class ContentTest(IsolatedAsyncioTestCase):
             await client.get_video_detail("bad-id")
         self.assertEqual(client._request.await_count, 1)
 
+    async def test_visual_collection_keeps_frames_when_no_speech_and_can_reuse_audio(self):
+        with TemporaryDirectory() as root:
+            transcriber = LocalTranscriber(root)
+            client = Mock(get_video_detail=AsyncMock(return_value={"video": {"play_addr": {"url_list": ["https://v.douyinvod.com/one"]}}}))
+            item = {"aweme_id": "123", "kind": "video", "duration": 5}
+            frames = [{"time": 0., "image": b"synthetic-jpeg"}]
+            with patch("douyin_rag.content.download_video", new=AsyncMock()), \
+                    patch.object(transcriber, "frames", return_value=frames), \
+                    patch.object(transcriber, "transcribe", side_effect=CollectionError("合成无语音", "no_speech")) as speech:
+                evidence = await transcriber.extract(item, client, include_frames=True)
+                self.assertEqual(evidence["frames"], frames)
+                self.assertEqual(evidence["segments"], [])
+                self.assertTrue(evidence["speech_error"])
+                speech.reset_mock()
+                await transcriber.extract(item, client, include_frames=True, transcribe_audio=False)
+                speech.assert_not_called()
+            self.assertFalse(list(Path(root).glob("transcribe-*")))
+
 
 class TranscriptionTest(TestCase):
     def test_url_validation_and_candidate_fallback(self):
@@ -71,3 +90,30 @@ class TranscriptionTest(TestCase):
                 factory.assert_called_once()
                 self.assertEqual(factory.call_args.kwargs["device"], "cpu")
                 self.assertEqual(factory.call_args.kwargs["compute_type"], "int8")
+
+    def test_real_synthetic_video_produces_bounded_timestamped_jpeg_frames(self):
+        import av
+        from fractions import Fraction
+        from io import BytesIO
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "synthetic.mp4"
+            with av.open(str(path), "w") as container:
+                stream = container.add_stream("mpeg4", rate=4)
+                stream.width, stream.height, stream.pix_fmt = 64, 48, "yuv420p"
+                for index in range(16):
+                    frame = av.VideoFrame(64, 48, "rgb24")
+                    frame.planes[0].update(bytes([index * 10]) * frame.planes[0].buffer_size)
+                    frame.pts, frame.time_base = index, Fraction(1, 4)
+                    for packet in stream.encode(frame):
+                        container.mux(packet)
+                for packet in stream.encode(None):
+                    container.mux(packet)
+            frames = LocalTranscriber.frames(path, 4)
+            self.assertGreater(len(frames), 1)
+            self.assertLessEqual(len(frames), 8)
+            self.assertEqual([frame["time"] for frame in frames], sorted(set(frame["time"] for frame in frames)))
+            for frame in frames:
+                self.assertLessEqual(len(frame["image"]), 1024 * 1024)
+                with av.open(BytesIO(frame["image"])) as image:
+                    decoded = next(image.decode(video=0))
+                    self.assertLessEqual(max(decoded.width, decoded.height), 1024)

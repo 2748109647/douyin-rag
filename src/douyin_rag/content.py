@@ -116,7 +116,48 @@ class LocalTranscriber:
                 raise CollectionError("未识别到可用语音，首版暂不识别画面文字或无声演示。", "no_speech")
             return result
 
-    async def extract(self, item, client, model_name="small"):
+    @staticmethod
+    def frames(path, duration=0):
+        """最多八张有时间位置的缩略帧，用现有 PyAV 编解码。"""
+        import av
+        result = []
+        try:
+            with av.open(str(path)) as container:
+                if not container.streams.video:
+                    return result
+                stream = container.streams.video[0]
+                start = float((stream.start_time or 0) * stream.time_base)
+                duration = float(stream.duration * stream.time_base) if stream.duration else float(container.duration or 0) / av.time_base or duration
+                if not math.isfinite(duration) or duration > MAX_SECONDS:
+                    raise CollectionError("视频时长无法安全用于画面分析。", "media_too_long")
+                end = max(0., duration - min(1., duration / 8))
+                targets = [end * index / 7 for index in range(8)] if duration > 0 else [0]
+                seen = set()
+                for target in targets:
+                    container.seek(int((start + target) / stream.time_base), stream=stream, backward=True)
+                    for index, frame in enumerate(container.decode(stream)):
+                        position = max(0., float(frame.time or start) - start)
+                        if position + .01 < target and index < 300:
+                            continue
+                        stamp = round(position, 2)
+                        if stamp not in seen:
+                            scale = min(1., 1024 / max(frame.width, frame.height))
+                            width, height = max(2, int(frame.width * scale) // 2 * 2), max(2, int(frame.height * scale) // 2 * 2)
+                            image = frame.reformat(width=width, height=height, format="yuvj420p")
+                            encoder = av.CodecContext.create("mjpeg", "w")
+                            encoder.width, encoder.height, encoder.pix_fmt = width, height, "yuvj420p"
+                            data = b"".join(bytes(packet) for packet in encoder.encode(image) + encoder.encode(None))
+                            if len(data) <= 1024 * 1024:
+                                result.append({"time": stamp, "image": data})
+                                seen.add(stamp)
+                        break
+        except CollectionError:
+            raise
+        except (av.error.FFmpegError, OSError, ValueError, OverflowError):
+            raise CollectionError("视频画面解码失败，无法提取字幕与关键帧。", "frame_decode_error") from None
+        return result
+
+    async def extract(self, item, client, model_name="small", *, include_frames=False, transcribe_audio=True):
         if item.get("kind") != "video":
             raise CollectionError("图文识别暂未包含在首版中。", "unsupported_content")
         if item.get("duration", 0) > MAX_SECONDS:
@@ -136,4 +177,20 @@ class LocalTranscriber:
                     if offset == len(candidates) - 1:
                         raise CollectionError("无法下载该视频，登录状态或媒体访问可能受限。", "media_download_failed") from None
             # 原生推理完成前等待当前步骤，暂停在作品之间生效；临时媒体随后自动删除。
-            return await asyncio.to_thread(self.transcribe, target, model_name)
+            if not include_frames:
+                return await asyncio.to_thread(self.transcribe, target, model_name)
+            evidence = {"frames": [], "segments": [], "speech_error": "", "frame_error": ""}
+            try:
+                evidence["frames"] = await asyncio.to_thread(self.frames, target, item.get("duration", 0))
+            except CollectionError as exc:
+                evidence["frame_error"] = str(exc)
+            if transcribe_audio:
+                try:
+                    evidence["segments"] = await asyncio.to_thread(self.transcribe, target, model_name)
+                except CollectionError as exc:
+                    if exc.code != "no_speech":
+                        raise
+                    evidence["speech_error"] = "未识别到可用语音。"
+                except ValueError:
+                    evidence["speech_error"] = "未获得可解码的语音。"
+            return evidence
