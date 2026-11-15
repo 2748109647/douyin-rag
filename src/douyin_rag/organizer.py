@@ -407,7 +407,12 @@ class Organizer:
                     raise
                 failure = exc
                 code = exc.code
-                reason = "模型结果未通过校验"
+                reason = f"模型结果未通过校验（{str(exc)[:400]}）"
+                correction = f"上一份结果未通过校验：{str(exc)[:400]}。请按原输出格式修正。作品或产品名称没有可逐字核对的文字依据时留空；不要为满足格式而编造名称、来源或内容。"
+                if messages and messages[0].get("role") == "system":
+                    messages = [{**messages[0], "content": messages[0]["content"] + "\n\n" + correction}, *messages[1:]]
+                else:
+                    messages = [{"role": "system", "content": correction}, *messages]
             except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, httpx.ProxyError) as exc:
                 failure = exc
                 code = "network_error"

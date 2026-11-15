@@ -241,6 +241,23 @@ class OrganizerTest(IsolatedAsyncioTestCase):
                 await self.owner.model_json([], subscription=True)
             self.assertEqual(caught.exception.code, "model_output_error")
 
+    async def test_model_retry_receives_validation_reason_without_mutating_callers_messages(self):
+        messages = [{"role": "system", "content": "原始输出要求"}, {"role": "user", "content": "合成数据"}]
+        self.owner.model_json = AsyncMock(side_effect=[{"valid": False}, {"valid": True}])
+        def validate(value):
+            if not value["valid"]:
+                raise CollectionError("名称缺少原文字证据", "model_output_error")
+            return value
+        with patch("douyin_rag.organizer.asyncio.sleep", new=AsyncMock()):
+            result = await self.owner._classification_model_json(messages, "识别背景", validate)
+        self.assertTrue(result["valid"])
+        retry = self.owner.model_json.await_args_list[1].args[0]
+        self.assertIn("名称缺少原文字证据", retry[0]["content"])
+        self.assertEqual(retry[0]["role"], "system")
+        self.assertEqual(retry[-1], messages[-1])
+        self.assertEqual(messages[0]["content"], "原始输出要求")
+        self.assertEqual(len(messages), 2)
+
     async def test_missing_model_rows_never_commits_incomplete_batch(self):
         snapshot, _ = demo_data()
         snapshot["demo"] = False
@@ -320,7 +337,8 @@ class OrganizerTest(IsolatedAsyncioTestCase):
         self.assertEqual(len(plan["assignments"]), len(snapshot["items"]))
         self.assertEqual(delay.await_args_list, [call(2), call(4)])
         first, second, third = self.owner.model_json.await_args_list
-        self.assertEqual([second, third], [first, first])
+        self.assertEqual([second.args[0][-1], third.args[0][-1]], [first.args[0][-1], first.args[0][-1]])
+        self.assertIn("上一份结果未通过校验", third.args[0][0]["content"])
         sent = self.owner.model_json.call_args.args[0][-1]["content"]
         self.assertEqual([item["aweme_id"] for item in json.loads(sent)["items"]], [last])
 
