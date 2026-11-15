@@ -181,6 +181,66 @@ class OrganizerTest(IsolatedAsyncioTestCase):
             await self.owner.model_json([], transport=httpx.MockTransport(lambda r: httpx.Response(401, text="synthetic-key-private")))
         self.assertNotIn("private", str(caught.exception))
 
+    async def test_subscription_model_uses_saved_chatgpt_login_and_fixed_model_without_api_key(self):
+        import os
+        import subprocess
+        calls = []
+
+        def command(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if argv[1:3] == ["login", "status"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=b"Logged in using ChatGPT", stderr=b"")
+            self.assertIn("--ephemeral", argv)
+            self.assertIn("read-only", argv)
+            self.assertEqual(argv[argv.index("--model")+1], "gpt-6-luna")
+            self.assertIn('model_reasoning_effort="xhigh"', argv)
+            self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
+            self.assertNotIn("OPENAI_API_KEY", kwargs["env"])
+            self.assertNotIn("DOUYIN_COOKIE", kwargs["env"])
+            self.assertEqual(Path(argv[argv.index("--image")+1]).read_bytes(), b"synthetic-jpeg")
+            Path(argv[argv.index("--output-last-message")+1]).write_text('{"verified":true}', encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+        with patch("douyin_rag.organizer.shutil.which", return_value="codex.exe"), \
+                patch("douyin_rag.organizer.subprocess.run", side_effect=command), \
+                patch.dict(os.environ, {"OPENAI_API_KEY": "synthetic-api-key", "DOUYIN_COOKIE": "synthetic-cookie"}):
+            result = await self.owner.model_json([{"role": "user", "content": "合成内容"}], subscription=True, images=[b"synthetic-jpeg"])
+        self.assertEqual(result, {"verified": True})
+        self.assertEqual(len(calls), 2)
+
+    async def test_subscription_rejects_api_auth_and_redacts_failed_cli_output(self):
+        import subprocess
+        with patch("douyin_rag.organizer.shutil.which", return_value="codex.exe"), \
+                patch("douyin_rag.organizer.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout=b"Logged in using API key", stderr=b"")):
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.model_json([], subscription=True)
+            self.assertEqual(caught.exception.code, "subscription_login_required")
+        responses = [subprocess.CompletedProcess([], 0, stdout=b"Logged in using ChatGPT", stderr=b""),
+                     subprocess.CompletedProcess([], 1, stdout=b"synthetic-private-content", stderr=b"synthetic-secret")]
+        with patch("douyin_rag.organizer.shutil.which", return_value="codex.exe"), \
+                patch("douyin_rag.organizer.subprocess.run", side_effect=responses):
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.model_json([], subscription=True)
+            self.assertEqual(caught.exception.code, "subscription_model_error")
+            self.assertNotIn("synthetic", str(caught.exception))
+
+    async def test_subscription_bounds_images_and_reports_invalid_json(self):
+        import subprocess
+        def command(argv, **kwargs):
+            if argv[1:3] == ["login", "status"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=b"ChatGPT", stderr=b"")
+            Path(argv[argv.index("--output-last-message")+1]).write_text('[]', encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+        with patch("douyin_rag.organizer.shutil.which", return_value="codex.exe"), \
+                patch("douyin_rag.organizer.subprocess.run", side_effect=command) as run:
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.model_json([], subscription=True, images=[b"a"]*9)
+            self.assertEqual(caught.exception.code, "image_input_error")
+            run.assert_not_called()
+            with self.assertRaises(CollectionError) as caught:
+                await self.owner.model_json([], subscription=True)
+            self.assertEqual(caught.exception.code, "model_output_error")
+
     async def test_missing_model_rows_never_commits_incomplete_batch(self):
         snapshot, _ = demo_data()
         snapshot["demo"] = False
