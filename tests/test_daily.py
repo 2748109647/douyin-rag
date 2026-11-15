@@ -498,3 +498,13 @@ class LockAndValidationTest(TestCase):
         context = {"content_type": "其他", "work_name": "", "sources": ["title"]}
         with self.assertRaises(CollectionError):
             DailyRunner.valid_summary({"short_title": "标题推测", "summary": "未经标明的推断。"}, compact=True, context=context)
+
+    def test_analysis_invalid_fields_explain_the_exact_retry_requirement(self):
+        value = {"content_type": "影视片段", "work_name": None, "name_evidence": "", "visual_text": "",
+                 "description": "无法确认片名的剧情片段。", "sources": ["title"]}
+        with self.assertRaises(CollectionError) as caught:
+            DailyRunner.valid_analysis(value, ["title"], "原标题", "")
+        self.assertIn("work_name", str(caught.exception))
+        self.assertIn("空字符串", str(caught.exception))
+        value["work_name"] = ""
+        self.assertEqual(DailyRunner.valid_analysis(value, ["title"], "原标题", "")["work_name"], "")
