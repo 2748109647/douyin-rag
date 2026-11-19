@@ -60,19 +60,22 @@ class DailyTest(IsolatedAsyncioTestCase):
 
         self.owner.client_factory = lambda cookies: Client()
         self.owner.writer_factory = Writer
-        self.owner.knowledge.transcriber = Mock(extract=AsyncMock(return_value={"segments": [{"start": 0., "end": 8., "text": "合成正文：先分析，再动手。"}], "frames": [], "speech_error": "", "frame_error": ""}))
+        self.owner.knowledge.transcriber = Mock(
+            extract=AsyncMock(return_value={"segments": [{"start": 0., "end": 8., "text": "合成正文：先分析，再动手。"}], "frames": [], "speech_error": "", "frame_error": ""}),
+            extract_note=AsyncMock(return_value={"images": [], "text": "合成图文正文：先分析，再动手。", "error": ""}))
         self.owner.knowledge.embeddings = Mock(encode=Mock(side_effect=lambda values: [[1., 0.] for _ in values]))
         self.owner.data["plan"] = {"categories": ["知识工具", "待复核"]}
         self.owner.data["snapshot"] = {"id": "manual-preserved"}
         self.owner.persist()
 
         async def model(messages, **kwargs):
-            if "视频内容分析助手" in messages[0]["content"]:
+            if "视频内容分析助手" in messages[0]["content"] or "图文内容分析助手" in messages[0]["content"]:
                 if self.summary_error:
                     raise CollectionError("合成模型不可用", "model_error")
                 payload = json.loads(messages[1]["content"])
                 return {"content_type": "知识讲解", "work_name": "", "name_evidence": "", "visual_text": "",
-                        "description": "视频讲解先分析问题再采取行动。", "sources": [payload["available_sources"][0]]}
+                        "description": "图文讲解先分析问题再采取行动。" if payload.get("kind") == "note" else "视频讲解先分析问题再采取行动。",
+                        "sources": [payload["available_sources"][0]]}
             if "日报助手" in messages[0]["content"]:
                 if self.summary_error:
                     raise CollectionError("合成模型不可用", "model_error")
@@ -122,13 +125,14 @@ class DailyTest(IsolatedAsyncioTestCase):
         result = await self.runner.run(self.moment(2))
         self.assertEqual(result["status"], "completed")
         report = self.report()
-        self.assertEqual(set(report["items"]), {"2"})
+        self.assertEqual(set(report["items"]), {"2", "3"})
         self.assertEqual(report["items"]["2"]["category"], "知识工具")
         self.assertEqual(report["items"]["2"]["short_title"], "先分析再动手")
         self.assertLessEqual(len(report["items"]["2"]["summary"]), 100)
         self.assertNotIn("points", report["items"]["2"])
-        self.assertEqual(self.members["10"], {"2"})
-        self.assertEqual(self.members["9"], {"1", "3"})
+        self.assertEqual(report["items"]["3"]["url"], "https://www.douyin.com/note/3")
+        self.assertEqual(self.members["10"], {"2", "3"})
+        self.assertEqual(self.members["9"], {"1"})
         self.assertEqual(self.owner.read("workspace", {})["snapshot"]["id"], "manual-preserved")
         self.assertFalse((self.owner.root / "daily" / self.records()["runs"][0]["id"] / "settings.json").exists())
         calls = self.owner.model_json.await_count
@@ -144,7 +148,7 @@ class DailyTest(IsolatedAsyncioTestCase):
         self.assertEqual(self.report()["status"], "completed")
         entry = self.records()["runs"][0]
         markdown = (self.owner.root / "daily" / entry["id"] / "report.md").read_text(encoding="utf-8")
-        self.assertIn("没有新增视频", markdown)
+        self.assertIn("没有新增作品", markdown)
         self.owner.model_json.assert_not_awaited()
         self.owner.knowledge.transcriber.extract.assert_not_awaited()
 
@@ -393,7 +397,7 @@ class DailyTest(IsolatedAsyncioTestCase):
                   "error": "未识别到可用语音，首版暂不识别画面文字或无声演示。"}}}
         DailyRunner.save_report(worker, report)
         markdown = (worker.root/"report.md").read_text(encoding="utf-8")
-        self.assertIn("未识别到可用语音，无法生成总结。", markdown)
+        self.assertIn("未识别到可用语音或图文文字，无法生成总结。", markdown)
         self.assertNotIn("原始标题" * 30, markdown)
         self.assertNotIn("一句话总结", markdown)
 
