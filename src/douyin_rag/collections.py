@@ -410,7 +410,7 @@ def _pick_first_url(image_data: dict) -> str:
         return image_data["download_url_list"][0]
     return ""
 
-def _extract_image_urls(data: dict) -> list[str]:
+def extract_image_urls(data: dict) -> list[str]:
     """兼容多种 aweme 图文结构，提取图片链接。"""
     image_urls = []
 
@@ -456,8 +456,8 @@ def normalize_page(data: dict, collects_id: str = "") -> dict:
             "sec_uid": author.get("sec_uid", ""),
             "aweme_type": item.get("aweme_type"),
             "kind": page_type,
-            "cover_url": ((item.get("video") or {}).get("cover") or {}).get("url_list", [""])[0] if ((item.get("video") or {}).get("cover") or {}).get("url_list") else (_extract_image_urls(item) or [""])[0],
-            "image_urls": _extract_image_urls(item),
+            "cover_url": ((item.get("video") or {}).get("cover") or {}).get("url_list", [""])[0] if ((item.get("video") or {}).get("cover") or {}).get("url_list") else (extract_image_urls(item) or [""])[0],
+            "image_urls": extract_image_urls(item),
             "duration": int(((item.get("video") or {}).get("duration") or 0) / 1000),
             "url": f"https://www.douyin.com/{page_type}/{aweme_id}",
             "likes": statistics.get("digg_count", 0),

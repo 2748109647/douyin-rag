@@ -1,13 +1,14 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import Mock, patch
 from unittest.mock import AsyncMock
 
 import httpx
 
-from douyin_rag.collections import CollectionError, CollectionClient
-from douyin_rag.content import download_video, media_candidates, media_url, LocalTranscriber
+from douyin_rag.collections import CollectionError, CollectionClient, extract_image_urls
+from douyin_rag.content import download_image, download_video, media_candidates, media_url, LocalOCR, LocalTranscriber
 
 
 class ContentTest(IsolatedAsyncioTestCase):
@@ -36,6 +37,49 @@ class ContentTest(IsolatedAsyncioTestCase):
                     await download_video("https://v.douyinvod.com/a", path, transport=httpx.MockTransport(
                         lambda r: httpx.Response(200, content=b"too-large")))
                 self.assertEqual(caught.exception.code, "media_too_large")
+
+    async def test_image_download_accepts_douyinpic_and_rejects_private_or_non_image(self):
+        with TemporaryDirectory() as root:
+            path = Path(root) / "photo.jpg"
+            await download_image("https://p3-sign.douyinpic.com/photo.jpg", path, transport=httpx.MockTransport(
+                lambda r: httpx.Response(200, content=b"synthetic-image", headers={"content-type": "image/jpeg"})))
+            self.assertEqual(path.read_bytes(), b"synthetic-image")
+            with self.assertRaises(CollectionError) as caught:
+                await download_image("https://p3-sign.douyinpic.com/photo.jpg", path, transport=httpx.MockTransport(
+                    lambda r: httpx.Response(302, headers={"location": "http://127.0.0.1/private"})))
+            self.assertEqual(caught.exception.code, "unsafe_media_url")
+            with self.assertRaises(CollectionError) as caught:
+                await download_image("https://p3-sign.douyinpic.com/photo.jpg", path, transport=httpx.MockTransport(
+                    lambda r: httpx.Response(200, content=b"<html>", headers={"content-type": "text/html"})))
+            self.assertEqual(caught.exception.code, "image_download_failed")
+
+    async def test_note_extraction_prefers_detail_images_and_orders_ocr_text(self):
+        with TemporaryDirectory() as root:
+            transcriber = LocalTranscriber(root)
+            client = Mock(get_video_detail=AsyncMock(return_value={"images": [
+                {"url_list": ["https://p3-sign.douyinpic.com/one.jpg"]},
+                {"url_list": ["https://p3-sign.douyinpic.com/two.jpg"]}]}))
+            item = {"aweme_id": "123", "kind": "note", "title": "原文案",
+                    "image_urls": ["https://p3.byteimg.com/stale.jpg"]}
+            transcriber.ocr.ensure_loaded = Mock()
+            transcriber.ocr.recognize = Mock(side_effect=["第二张文字", "第一张文字"])
+            transcriber._image_preview = Mock(return_value=b"synthetic-jpeg")
+            with patch("douyin_rag.content.download_image", new=AsyncMock()):
+                evidence = await transcriber.extract_note(item, client)
+            self.assertEqual(evidence["text"], "第二张文字\n第一张文字")
+            self.assertEqual(len(evidence["images"]), 2)
+            self.assertEqual(evidence["images"][0]["image"], b"synthetic-jpeg")
+            client.get_video_detail.assert_awaited_once_with("123")
+            self.assertFalse(evidence["error"])
+
+    async def test_note_extraction_without_images_fails_without_inventing_text(self):
+        with TemporaryDirectory() as root:
+            transcriber = LocalTranscriber(root)
+            client = Mock(get_video_detail=AsyncMock(return_value={}))
+            item = {"aweme_id": "123", "kind": "note", "title": "只有标题", "image_urls": []}
+            with self.assertRaises(CollectionError) as caught:
+                await transcriber.extract_note(item, client)
+            self.assertEqual(caught.exception.code, "content_unavailable")
 
     async def test_detail_validates_identity_and_does_not_accept_upstream_empty_result(self):
         client = CollectionClient("sessionid=synthetic")
@@ -68,6 +112,23 @@ class ContentTest(IsolatedAsyncioTestCase):
 
 
 class TranscriptionTest(TestCase):
+    def test_local_ocr_sorts_lines_by_position_and_ignores_empty_results(self):
+        with TemporaryDirectory() as root:
+            ocr = LocalOCR(root)
+            ocr.ensure_loaded = Mock()
+            ocr.engine = Mock(return_value=SimpleNamespace(
+                txts=("下", "上"),
+                boxes=[[[0, 10], [1, 10], [1, 20], [0, 20]], [[0, 0], [1, 0], [1, 5], [0, 5]]]))
+            self.assertEqual(ocr.recognize("synthetic"), "上\n下")
+            ocr.engine.return_value = SimpleNamespace(txts=None, boxes=None)
+            self.assertEqual(ocr.recognize("synthetic"), "")
+
+    def test_image_url_structure_variants_are_supported(self):
+        self.assertEqual(extract_image_urls({"images": [{"url_list": ["https://one"]}]}), ["https://one"])
+        self.assertEqual(extract_image_urls({"image_post_info": {"images": [
+            {"display_image": {"url_list": ["https://two"]}}]}}), ["https://two"])
+        self.assertEqual(extract_image_urls({}), [])
+
     def test_url_validation_and_candidate_fallback(self):
         for value in ("file:///a", "https://douyinvod.com.evil.test/a", "https://user:pass@v.douyinvod.com/a", "https://v.douyinvod.com:9000/a"):
             with self.assertRaises(CollectionError):

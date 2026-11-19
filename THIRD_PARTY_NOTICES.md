@@ -56,3 +56,9 @@ SOFTWARE.
 - DM Sans 来自 Google Fonts，SIL Open Font License 1.1，许可保存在 web/assets/DM-Sans-OFL.txt。
 - web/assets/demo-sheet.png 由内置 image_gen 生成，仅在明确标识的示例模式使用，不代表真实账号收藏。
 - 生成提示词：六格、三列两行、无文字无边框的自然摄影拼图，依次为笔记本办公桌、阳光客厅、番茄牛腩、窗边湖景、窗前拉伸、自动化工作台；柔和日光、真实材质和统一低饱和色调。以网页 CSS 精确定位各格作为示例封面。
+
+# 图文文字识别
+
+- RapidOCR（Python 包 `rapidocr`）用于本机图文识别，Apache-2.0 许可。
+- 来源：https://github.com/RapidAI/RapidOCR
+- 本项目通过依赖调用本地 OCR 引擎，不复制其源码；OCR 模型随依赖安装，不上传图片。

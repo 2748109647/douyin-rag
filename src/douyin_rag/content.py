@@ -11,13 +11,17 @@ from urllib.parse import urlsplit, urljoin
 
 import httpx
 
-from .collections import CollectionError
+from .collections import CollectionError, extract_image_urls
 from .verification import DOUYIN_FIXED_USER_AGENT
 
 
-MEDIA_DOMAINS = ("douyinvod.com", "douyincdn.com", "douyin.com", "bytecdn.cn", "byteimg.com", "ibytedtos.com", "iesdouyin.com")
+MEDIA_DOMAINS = ("douyinvod.com", "douyincdn.com", "douyin.com", "douyinpic.com", "bytecdn.cn", "byteimg.com", "ibytedtos.com", "iesdouyin.com")
 MAX_BYTES = 256 * 1024 * 1024
 MAX_SECONDS = 3600
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_NOTE_IMAGES = 100
+MAX_ANALYSIS_IMAGES = 8
+MAX_NOTE_TEXT = 50000
 
 
 def media_url(value):
@@ -30,7 +34,7 @@ def media_url(value):
             return value
     except (TypeError, ValueError):
         pass
-    raise CollectionError("视频媒体地址不在允许的抖音域名范围内。", "unsafe_media_url")
+    raise CollectionError("媒体地址不在允许的抖音域名范围内。", "unsafe_media_url")
 
 
 def media_candidates(detail):
@@ -81,12 +85,92 @@ async def download_video(url, target, transport=None):
     raise CollectionError("视频媒体重定向次数过多。", "media_download_failed")
 
 
+async def download_image(url, target, transport=None):
+    """逐跳校验地址；不向图片 CDN 发送登录 Cookie 或模型密钥。"""
+    headers = {"User-Agent": DOUYIN_FIXED_USER_AGENT, "Referer": "https://www.douyin.com/"}
+    async with httpx.AsyncClient(timeout=45, follow_redirects=False, transport=transport) as client:
+        async with asyncio.timeout(120):
+            for _ in range(5):
+                url = media_url(url)
+                async with client.stream("GET", url, headers=headers) as response:
+                    if response.is_redirect:
+                        url = urljoin(url, response.headers.get("location", ""))
+                        continue
+                    if response.status_code != 200:
+                        raise CollectionError("图片下载被拒绝，请重新登录后重试。", "image_download_failed")
+                    content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                    if content_type and not (content_type.startswith("image/") or content_type == "application/octet-stream"):
+                        raise CollectionError("图片地址返回了非图片内容。", "image_download_failed")
+                    try:
+                        size = int(response.headers.get("content-length", "0"))
+                    except ValueError:
+                        size = 0
+                    if size > MAX_IMAGE_BYTES:
+                        raise CollectionError("图片超过单张 20 MiB 的处理上限。", "image_too_large")
+                    received = 0
+                    with Path(target).open("wb") as handle:
+                        async for chunk in response.aiter_bytes():
+                            received += len(chunk)
+                            if received > MAX_IMAGE_BYTES:
+                                raise CollectionError("图片超过单张 20 MiB 的处理上限。", "image_too_large")
+                            handle.write(chunk)
+                    if not received:
+                        raise CollectionError("没有下载到可识别的图片内容。", "empty_image")
+                    return
+    raise CollectionError("图片媒体重定向次数过多。", "image_download_failed")
+
+
+class LocalOCR:
+    """本机图文识别；模型随依赖安装，不上传图片。"""
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.engine = None
+        self.lock = threading.Lock()
+
+    def ensure_loaded(self):
+        from rapidocr import RapidOCR
+        with self.lock:
+            if self.engine is None:
+                self.engine = RapidOCR()
+
+    @staticmethod
+    def _top_left(box):
+        try:
+            points = box.tolist() if hasattr(box, "tolist") else box
+            xs = [float(point[0]) for point in points]
+            ys = [float(point[1]) for point in points]
+            return min(xs), min(ys)
+        except (IndexError, TypeError, ValueError):
+            return 0., 0.
+
+    def recognize(self, path):
+        self.ensure_loaded()
+        with self.lock:
+            result = self.engine(str(path))
+        texts = getattr(result, "txts", None)
+        boxes = getattr(result, "boxes", None)
+        if not texts:
+            return ""
+        rows = []
+        for index, text in enumerate(texts):
+            value = str(text).strip()
+            if not value:
+                continue
+            box = boxes[index] if boxes is not None and index < len(boxes) else None
+            position = self._top_left(box) if box is not None else (0., 0.)
+            rows.append((position[1], position[0], index, value))
+        rows.sort()
+        return "\n".join(row[3] for row in rows)
+
+
 class LocalTranscriber:
     def __init__(self, root):
         self.root = Path(root)
         self.model = None
         self.model_name = None
         self.lock = threading.Lock()
+        self.ocr = LocalOCR(self.root)
 
     def transcribe(self, path, model_name="small"):
         if model_name not in {"base", "small"}:
@@ -159,7 +243,7 @@ class LocalTranscriber:
 
     async def extract(self, item, client, model_name="small", *, include_frames=False, transcribe_audio=True):
         if item.get("kind") != "video":
-            raise CollectionError("图文识别暂未包含在首版中。", "unsupported_content")
+            raise CollectionError("图文内容请使用图片文字识别。", "unsupported_content")
         if item.get("duration", 0) > MAX_SECONDS:
             raise CollectionError("视频超过单条 60 分钟的处理上限。", "media_too_long")
         detail = await client.get_video_detail(item["aweme_id"])
@@ -194,3 +278,80 @@ class LocalTranscriber:
                 except ValueError:
                     evidence["speech_error"] = "未获得可解码的语音。"
             return evidence
+
+    @staticmethod
+    def _image_preview(path, size=1024):
+        import av
+        try:
+            with av.open(str(path)) as container:
+                if not container.streams.video:
+                    raise CollectionError("图片无法解码。", "image_decode_error")
+                frame = next(container.decode(video=0))
+                edge = max(frame.width, frame.height)
+                if edge <= 0:
+                    raise CollectionError("图片尺寸无法用于分析。", "image_decode_error")
+                scale = min(1., size / edge)
+                width = max(2, int(frame.width * scale) // 2 * 2)
+                height = max(2, int(frame.height * scale) // 2 * 2)
+                image = frame.reformat(width=width, height=height, format="yuvj420p")
+                encoder = av.CodecContext.create("mjpeg", "w")
+                encoder.width, encoder.height, encoder.pix_fmt = width, height, "yuvj420p"
+                data = b"".join(bytes(packet) for packet in encoder.encode(image) + encoder.encode(None))
+        except CollectionError:
+            raise
+        except (StopIteration, TypeError, av.error.FFmpegError, OSError, ValueError, OverflowError):
+            raise CollectionError("图片预览解码失败。", "image_decode_error") from None
+        if len(data) > 1024 * 1024:
+            raise CollectionError("图片预览超过单张 1 MiB 的分析上限。", "image_too_large")
+        return data
+
+    async def extract_note(self, item, client, *, recognize=True, preview=True):
+        """识别图文图片文字；本地 OCR，可选生成最多八张分析预览。"""
+        detail = None
+        try:
+            detail = await client.get_video_detail(item["aweme_id"])
+        except CollectionError:
+            detail = None
+        urls = extract_image_urls(detail) if isinstance(detail, dict) else []
+        if not urls:
+            urls = [value for value in item.get("image_urls") or [] if isinstance(value, str) and value.strip()]
+        seen, unique = set(), []
+        for value in urls:
+            if value in seen:
+                continue
+            seen.add(value)
+            unique.append(value)
+        urls = unique[:MAX_NOTE_IMAGES]
+        if not urls:
+            raise CollectionError("作品详情未提供可读取的图片地址。", "content_unavailable")
+        if recognize:
+            self.ocr.ensure_loaded()
+        if len(urls) <= MAX_ANALYSIS_IMAGES:
+            selected = set(range(len(urls)))
+        else:
+            selected = {round(index * (len(urls) - 1) / (MAX_ANALYSIS_IMAGES - 1)) for index in range(MAX_ANALYSIS_IMAGES)}
+        if not preview:
+            selected = set()
+        texts, images, errors = [], [], []
+        self.root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="transcribe-", dir=self.root) as directory:
+            for index, url in enumerate(urls):
+                target = Path(directory) / f"image-{index}.bin"
+                try:
+                    await download_image(url, target)
+                    if recognize:
+                        try:
+                            value = await asyncio.to_thread(self.ocr.recognize, target)
+                        except (OSError, ValueError):
+                            errors.append(f"第 {index+1} 张图片识别失败。")
+                            value = ""
+                        if value.strip():
+                            texts.append(value.strip())
+                    if index in selected:
+                        try:
+                            images.append({"time": 0., "image": await asyncio.to_thread(self._image_preview, target)})
+                        except CollectionError as exc:
+                            errors.append(f"第 {index+1} 张图片预览失败：{exc}")
+                except (httpx.HTTPError, TimeoutError, CollectionError):
+                    errors.append(f"第 {index+1} 张图片读取失败。")
+        return {"images": images, "text": "\n".join(texts), "error": " ".join(errors)}
