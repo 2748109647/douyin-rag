@@ -163,14 +163,14 @@ try {
     result = {error: ["create", "move"].includes(input.operation)
         ? "write_unconfirmed" : "browser_unavailable"};
 }
-console.log("SHICANG_EGO " + JSON.stringify({...result, spaceId, handedOff}));
+console.log("TROVE_EGO " + JSON.stringify({...result, spaceId, handedOff}));
 """
 
 
 class EgoWriter:
     def __init__(self, root, interval=2, client_factory=CollectionClient):
         key = hashlib.sha256(str(Path(root).resolve()).encode()).hexdigest()[:12]
-        self.space_name = f"拾藏整理 {key}"
+        self.space_name = f"Trove 整理 {key}"
         self.space_id = None
         self.handed_off = False
         self.interval = interval
@@ -195,7 +195,7 @@ class EgoWriter:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             # Windows 的 Ego CLI 将 console.log 发到 stderr，保留两种传输方式。
-            prefix = b"SHICANG_EGO "
+            prefix = b"TROVE_EGO "
             lines = (completed.stdout + b"\n" + completed.stderr).splitlines()
             responses = [line.removeprefix(prefix) for line in lines if line.startswith(prefix)]
             if len(responses) != 1:
@@ -216,7 +216,7 @@ class EgoWriter:
         error = result.get("error")
         if error:
             messages = {
-                "login_required": "请在 Ego Lite 的拾藏整理页面登录抖音，然后点击继续整理。",
+                "login_required": "请在 Ego Lite 的 Trove 整理页面登录抖音，然后点击继续整理。",
                 "account_changed": "Ego Lite 登录的是另一个抖音账号。请切换到扫描所用账号后继续整理。",
                 "account_unconfirmed": "暂时无法确认 Ego Lite 中的抖音账号。请检查登录或验证状态后继续整理。",
                 "browser_session_changed": "Ego Lite 登录会话刚刚变化。继续整理时会重新核对账号。",

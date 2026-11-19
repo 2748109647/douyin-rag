@@ -22,7 +22,7 @@ class ApiTest(TestCase):
 
     def test_web_assets_health_and_no_mcp(self):
         self.assertEqual(self.client.get("/health").status_code, 200)
-        self.assertIn("拾藏", self.client.get("/").text)
+        self.assertIn("Trove", self.client.get("/").text)
         self.assertEqual(self.client.get("/static/app.js").status_code, 200)
         self.assertEqual(self.client.get("/mcp").status_code, 404)
 

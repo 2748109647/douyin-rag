@@ -171,7 +171,7 @@ class WriterTest(IsolatedAsyncioTestCase):
             with patch.dict(os.environ, {"DOUYIN_COOKIE": "sessionid=synthetic-private"}), \
                     patch("douyin_rag.ego_writer.subprocess.run") as run:
                 run.return_value.stdout = b''
-                run.return_value.stderr = b'SHICANG_EGO {"spaceId": 9, "handedOff": false}\r\n'
+                run.return_value.stderr = b'TROVE_EGO {"spaceId": 9, "handedOff": false}\r\n'
                 item_ids = ["90071992547409931", "90071992547409932"]
                 await writer.move_request(item_ids, target="123", name="合成夹")
                 self.assertEqual(run.call_args.args[0], ["ego-browser", "nodejs"])
@@ -184,13 +184,13 @@ class WriterTest(IsolatedAsyncioTestCase):
                 self.assertIn("/aweme/v1/web/collects/video/move/", source)
                 self.assertNotIn("synthetic-private", source)
                 self.assertNotIn("DOUYIN_COOKIE", run.call_args.kwargs["env"])
-                run.return_value.stderr = b'SHICANG_EGO {"spaceId": 9, "error": "write_rejected", "platformStatus": 42, "raw": "private-payload"}'
+                run.return_value.stderr = b'TROVE_EGO {"spaceId": 9, "error": "write_rejected", "platformStatus": 42, "raw": "private-payload"}'
                 with self.assertRaises(CollectionError) as caught:
                     await writer.move_request(item_ids, target="123")
                 self.assertEqual(caught.exception.code, "write_rejected")
                 self.assertIn("42", str(caught.exception))
                 self.assertNotIn("private-payload", str(caught.exception))
-                run.return_value.stderr = b'SHICANG_EGO {"spaceId": 9, "error": "browser_attention", "httpStatus": 429, "handedOff": true}'
+                run.return_value.stderr = b'TROVE_EGO {"spaceId": 9, "error": "browser_attention", "httpStatus": 429, "handedOff": true}'
                 with self.assertRaises(CollectionError) as caught:
                     await writer.move_request(item_ids, target="123")
                 self.assertEqual(caught.exception.code, "browser_attention")
@@ -219,7 +219,7 @@ class WriterTest(IsolatedAsyncioTestCase):
             client.own_account_marker.return_value = "a" * 64
             writer = EgoWriter(directory, client_factory=Mock(return_value=client))
             with patch("douyin_rag.ego_writer.subprocess.run") as run:
-                run.return_value.stdout = b'SHICANG_EGO {"spaceId": 12, "handedOff": true, "error": "login_required"}'
+                run.return_value.stdout = b'TROVE_EGO {"spaceId": 12, "handedOff": true, "error": "login_required"}'
                 run.return_value.stderr = b''
                 with self.assertRaises(CollectionError) as caught:
                     await writer.open("sessionid=synthetic")
@@ -227,7 +227,7 @@ class WriterTest(IsolatedAsyncioTestCase):
                 await writer.close()
                 self.assertEqual(run.call_count, 1)
                 result = {"spaceId": 12, "handedOff": False, "sessionMarker": "b" * 64}
-                run.return_value.stdout = b'SHICANG_EGO ' + json.dumps(result).encode()
+                run.return_value.stdout = b'TROVE_EGO ' + json.dumps(result).encode()
                 await writer.open("sessionid=synthetic")
                 source = run.call_args.kwargs["input"].decode("utf-8")
                 self.assertIn('"spaceId": 12', source)

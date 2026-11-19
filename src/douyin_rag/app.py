@@ -79,7 +79,7 @@ def create_app(organizer=None):
         if shared_writer:
             await shared_writer.close()
 
-    app = FastAPI(title="拾藏", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app = FastAPI(title="Trove", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]"])
     app.state.organizer = owner
 
@@ -88,7 +88,7 @@ def create_app(organizer=None):
         if request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
             if request.headers.get("x-shicang-request") != "1" or (origin and origin != str(request.base_url).rstrip("/")):
-                return JSONResponse({"message": "请从本机拾藏页面发起操作。", "code": "origin_rejected"}, status_code=403)
+                return JSONResponse({"message": "请从本机 Trove 页面发起操作。", "code": "origin_rejected"}, status_code=403)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -289,7 +289,7 @@ def main():
     import argparse
     import sys
     import uvicorn
-    parser = argparse.ArgumentParser(description="在本机打开拾藏收藏整理网页")
+    parser = argparse.ArgumentParser(description="在本机打开 Trove 收藏整理网页")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--state-dir", type=Path, help="指定本机运行数据目录")
     commands = parser.add_mutually_exclusive_group()

@@ -59,7 +59,7 @@ class OperationLock:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             handle.close()
-            raise CollectionError("另一个拾藏任务正在运行，请稍后重试。", "busy") from None
+            raise CollectionError("另一个 Trove 任务正在运行，请稍后重试。", "busy") from None
         self.handle = handle
         return self
 

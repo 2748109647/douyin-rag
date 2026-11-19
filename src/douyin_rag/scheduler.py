@@ -26,7 +26,7 @@ class DailySchedule:
         windowless = executable.with_name("pythonw.exe")
         self.executable = windowless if windowless.is_file() else executable
         key = hashlib.sha256(str(self.root).casefold().encode()).hexdigest()[:12]
-        self.name = f"拾藏每日整理-{key}"
+        self.name = f"Trove 每日整理-{key}"
         self.marker = f"douyin-rag:daily:{key}:v1"
 
     def script(self, operation, moment=None):
@@ -41,7 +41,7 @@ $ErrorActionPreference = 'Stop'
 $name = {literal(self.name)}
 $marker = {literal(self.marker)}
 $existing = Get-ScheduledTask -TaskName $name -TaskPath '\\' -ErrorAction SilentlyContinue
-if ($existing -and $existing.Description -ne $marker) {{ throw '同名任务不属于拾藏，已停止操作。' }}
+if ($existing -and $existing.Description -ne $marker) {{ throw '同名任务不属于 Trove，已停止操作。' }}
 """
         if operation == "install":
             setup += f"""
