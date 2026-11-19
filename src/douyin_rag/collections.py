@@ -107,7 +107,12 @@ class CollectionClient:
         self.user_agent = DOUYIN_FIXED_USER_AGENT
         self.verify_params = None
         self._cookie_ms_token = self._extract_ms_token_from_cookie(self.cookies)
-        self._http_client = httpx.AsyncClient(proxy=proxy, timeout=30)
+        try:
+            self._http_client = httpx.AsyncClient(proxy=proxy, timeout=30)
+        except httpx.InvalidURL:
+            # httpx 0.28.1 解析 Windows 代理排除列表中的 [::1] 等条目会抛 InvalidURL；
+            # 环境代理不可解析时退回直连，避免收藏链路整体无法使用。
+            self._http_client = httpx.AsyncClient(proxy=proxy, timeout=30, trust_env=False)
 
     async def __aenter__(self):
         return self

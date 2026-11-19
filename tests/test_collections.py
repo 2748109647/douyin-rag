@@ -1,7 +1,8 @@
 import hashlib
 import json
+import os
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs
 
 import httpx
@@ -46,6 +47,11 @@ class CollectionsTest(IsolatedAsyncioTestCase):
                 await self.client.get_collection_folders(**kwargs)
         with self.assertRaises(ValueError):
             await self.client.get_collection_videos(" ")
+
+    async def test_bracketed_ipv6_no_proxy_falls_back_to_direct_connection(self):
+        with patch.dict(os.environ, {"NO_PROXY": "localhost,[::1]"}):
+            client = CollectionClient("sessionid=synthetic; UIFID=identity; s_v_web_id=verify-cookie")
+        await client.close()
 
     async def test_current_account_marker_requires_authenticated_self_profile(self):
         sec_uid = "MS4wLjABSyntheticAccount"
