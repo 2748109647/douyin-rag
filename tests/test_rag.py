@@ -1,7 +1,7 @@
 import json
 from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from douyin_rag.collections import CollectionError
 from douyin_rag.organizer import Organizer, demo_data
@@ -128,6 +128,45 @@ class RagTest(IsolatedAsyncioTestCase):
         self.owner.data["snapshot"]["account_marker"] = "changed"
         with self.assertRaises(CollectionError):
             await self.kb.index()
+
+    async def test_note_index_uses_local_ocr_and_note_url(self):
+        self.owner.cookies = lambda: "sessionid=synthetic-note"
+        self.owner.data["snapshot"]["account_marker"] = self.owner.account_marker(self.owner.cookies())
+        note = {"aweme_id": "note1", "title": "图文标题", "author": "图文作者", "kind": "note",
+                "image_urls": ["https://p3-sign.douyinpic.com/one.jpg"],
+                "url": "https://www.douyin.com/note/note1"}
+        self.owner.data["snapshot"]["items"].append(note)
+        class Client:
+            async def __aenter__(inner): return inner
+            async def __aexit__(inner, *args): pass
+        self.owner.client_factory = lambda cookies: Client()
+        self.kb.transcriber = Mock(extract_note=AsyncMock(return_value={
+            "images": [{"time": 0., "image": b"synthetic-jpeg"}], "text": "图片文字内容", "error": ""}))
+        self.owner.job = {"processed": 0, "total": None}
+        with patch("douyin_rag.rag.asyncio.sleep", new=AsyncMock()):
+            await self.kb.index(item_ids=["note1"])
+        document = self.kb.document(note)
+        self.assertEqual(document["status"], "ready")
+        self.assertIn("图文标题", document["segments"][0]["text"])
+        self.assertIn("图片文字内容", document["segments"][0]["text"])
+        self.assertEqual(self.kb.status()["unsupported"], 0)
+        sources = self.kb.retrieve("图片文字内容", self.kb.snapshot())
+        self.assertTrue(sources)
+        self.assertEqual(sources[0]["url"], "https://www.douyin.com/note/note1")
+        self.assertEqual(sources[0]["kind"], "note")
+        visual = {}
+        self.kb.transcriber.extract_note.reset_mock()
+        with patch("douyin_rag.rag.asyncio.sleep", new=AsyncMock()):
+            await self.kb.index(item_ids=["note1"], visual=visual)
+        self.assertEqual(visual["note1"]["frames"][0]["image"], b"synthetic-jpeg")
+        self.assertFalse(self.kb.transcriber.extract_note.call_args.kwargs["recognize"])
+        self.assertTrue(self.kb.transcriber.extract_note.call_args.kwargs["preview"])
+
+    async def test_note_fingerprint_does_not_change_with_speech_model(self):
+        note = {"aweme_id": "note1", "title": "图文标题", "kind": "note", "duration": 0}
+        before = self.kb.fingerprint(note)
+        self.owner.settings["asr_model"] = "base"
+        self.assertEqual(self.kb.fingerprint(note), before)
 
     async def test_failed_frame_download_does_not_replace_cached_speech_with_failure(self):
         self.owner.cookies = lambda: "sessionid=synthetic"

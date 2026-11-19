@@ -118,7 +118,7 @@ def create_app(organizer=None):
     @app.post("/api/knowledge/index")
     async def index_content():
         if login_browser:
-            raise CollectionError("请先完成登录，再处理视频内容。", "busy")
+            raise CollectionError("请先完成登录，再处理作品内容。", "busy")
         snapshot = owner.knowledge.snapshot()
         if snapshot.get("demo"):
             raise CollectionError("示例模式已提供合成转写，请切换真实收藏后处理。", "demo_mode")
